@@ -77,7 +77,15 @@ const GlassCard: React.FC<{ children: React.ReactNode; title?: string; className
 );
 
 const App: React.FC = () => {
-  const [apiKey, setApiKey] = useState<string>(process.env.API_KEY || '');
+  // Safe environment variable access
+  const [apiKey, setApiKey] = useState<string>(() => {
+    try {
+      return process.env.API_KEY || '';
+    } catch (e) {
+      return '';
+    }
+  });
+  
   const [status, setStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -115,6 +123,17 @@ const App: React.FC = () => {
       }
     } catch (e) {
       console.error("Failed to load history", e);
+    }
+    
+    // Check API Key on mount and warn if missing
+    if (!apiKey) {
+      // Small delay to ensure UI is ready
+      setTimeout(() => {
+        setNotification({ 
+          message: "⚠️ 未检测到 API Key，请在 Vercel 环境变量中配置 API_KEY", 
+          type: 'info' 
+        });
+      }, 1000);
     }
   }, []);
 
@@ -184,7 +203,18 @@ const App: React.FC = () => {
   };
 
   const startAnalysis = async (mode: AnalysisMode) => {
-    if (!file || !apiKey) return;
+    if (!file) {
+      setNotification({ message: "请先上传视频文件", type: 'error' });
+      return;
+    }
+    
+    if (!apiKey) {
+      setNotification({ 
+        message: "配置错误：未找到 Gemini API Key。请检查 Vercel 环境变量。", 
+        type: 'error' 
+      });
+      return;
+    }
     
     // Set Mode
     setAnalysisMode(mode);
