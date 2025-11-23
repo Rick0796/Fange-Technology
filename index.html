@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>凡哥科技 - AI智能学习</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Load Mermaid.js for Mind Maps -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #0F0F23;
+        color: #ffffff;
+      }
+      /* Custom scrollbar for better aesthetics */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #0F0F23; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #334155; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #475569; 
+      }
+      .glass-panel {
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      
+      /* HIDE MERMAID ERROR ARTIFACTS AGGRESSIVELY */
+      /* Hides the default error div appended to body */
+      #dmermaid, .error-icon, [id^="mermaid-error-"], .error-text {
+        display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        width: 0 !important;
+        position: absolute !important;
+      }
+      /* Hides the SVG text element containing 'Syntax error' */
+      svg[id^="mermaid-"] text[class*="error"], 
+      svg[id^="mermaid-"] g[class*="error"] {
+        display: none !important;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
