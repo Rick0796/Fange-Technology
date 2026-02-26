@@ -1,4 +1,5 @@
 
+// Main Application Component
 import React, { useState, useEffect, useRef } from 'react';
 import { AnalysisResult, AnalysisStatus, KeyTakeaway, HistoryItem, AnalysisMode, SoraPrompt } from './types';
 import { analyzeVideoContent, generateSoraPrompts, generateViralCopies } from './services/geminiService';
