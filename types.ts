@@ -20,12 +20,35 @@ export interface KeyTakeaway {
   detail: string;
 }
 
+export interface SoraPrompt {
+  title: string;
+  fullPrompt: string;
+}
+
+export interface ViralContent {
+  copies: string[];
+  script: string;
+  soraPrompts?: SoraPrompt[];
+}
+
+export interface VideoStructure {
+  coreProposition: string;
+  openingType: string;
+  conflictStructure: string;
+  progressionLogic: string;
+  psychologicalHook: string;
+  climaxSentence: string;
+  languageFeatures: string;
+  emotionalCurve: string;
+  viewerReward: string;
+}
+
 export interface AnalysisResult {
   summary: string;
-  keyTakeaways: KeyTakeaway[]; // Updated to object array
-  mindMapMermaid: string;
+  keyTakeaways: KeyTakeaway[];
+  videoStructure: VideoStructure;
   timestamps: Timestamp[];
-  actionItems: string[];
+  viralContent: ViralContent;
   fileUri?: string;
 }
 

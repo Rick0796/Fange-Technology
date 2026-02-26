@@ -1,9 +1,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AnalysisResult, AnalysisStatus, KeyTakeaway, HistoryItem, AnalysisMode } from './types';
-import { analyzeVideoContent } from './services/geminiService';
+import { AnalysisResult, AnalysisStatus, KeyTakeaway, HistoryItem, AnalysisMode, SoraPrompt } from './types';
+import { analyzeVideoContent, generateSoraPrompts, generateViralCopies } from './services/geminiService';
 import VideoPlayer from './components/VideoPlayer';
-import MindMap from './components/MindMap';
 import ChatInterface from './components/ChatInterface';
 import ProcessingVisualizer from './components/ProcessingVisualizer';
 import ParticleBackground from './components/ParticleBackground';
@@ -99,6 +98,14 @@ const App: React.FC = () => {
   
   // UI State for Background Processing
   const [isBackgroundMode, setIsBackgroundMode] = useState(false);
+
+  // Sora Prompts State
+  const [soraPrompts, setSoraPrompts] = useState<SoraPrompt[]>([]);
+  const [isGeneratingSora, setIsGeneratingSora] = useState(false);
+
+  // Viral Copies State
+  const [viralCopies, setViralCopies] = useState<string[]>([]);
+  const [isGeneratingViralCopies, setIsGeneratingViralCopies] = useState(false);
 
   // Detail Modal State
   const [selectedTakeaway, setSelectedTakeaway] = useState<KeyTakeaway | null>(null);
@@ -302,10 +309,57 @@ const App: React.FC = () => {
     setResult(null);
     setProgress(0);
     setIsBackgroundMode(false);
+    setSoraPrompts([]);
+    setViralCopies([]);
     abortControllerRef.current = null;
   };
 
-  // Determine if we should show the landing page (Idle or Backgrounded)
+  const handleSoraUpdate = (data: any) => {
+    if (Array.isArray(data)) {
+      setSoraPrompts(data);
+    } else if (data.title && data.fullPrompt) {
+      setSoraPrompts([data]);
+    }
+  };
+
+  const handleViralUpdate = (data: any) => {
+    if (Array.isArray(data)) {
+      setViralCopies(data);
+    } else if (typeof data === 'string') {
+      setViralCopies([data]);
+    }
+  };
+
+  const handleSoraGenerate = async () => {
+    if (!file || !result || isGeneratingSora) return;
+    
+    setIsGeneratingSora(true);
+    try {
+      // Use a faster model for prompt generation if needed, but sticking to 3.1 pro for quality
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri);
+      setSoraPrompts(prompts);
+      setNotification({ message: "Sora 提示词生成成功！", type: 'success' });
+    } catch (e: any) {
+      console.error("Sora generation error in App:", e);
+      setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
+    } finally {
+      setIsGeneratingSora(false);
+    }
+  };
+  const handleViralCopiesGenerate = async () => {
+    if (!result?.viralContent.script || isGeneratingViralCopies) return;
+    
+    setIsGeneratingViralCopies(true);
+    try {
+      const copies = await generateViralCopies(result.viralContent.script, apiKey);
+      setViralCopies(copies);
+      setNotification({ message: "爆款文案生成成功！", type: 'success' });
+    } catch (e: any) {
+      setNotification({ message: e.message, type: 'error' });
+    } finally {
+      setIsGeneratingViralCopies(false);
+    }
+  };
   const showLanding = status === AnalysisStatus.IDLE || isBackgroundMode;
 
   return (
@@ -618,20 +672,8 @@ const App: React.FC = () => {
                      </GlassCard>
                    )}
 
-                   {/* CHAT (DEEP MODE ONLY) */}
-                   {analysisMode === 'DEEP' && (
-                     <div className="h-[500px] rounded-xl overflow-hidden border border-white/10">
-                        {file ? (
-                          <ChatInterface videoFile={file!} apiKey={apiKey} fileUri={result.fileUri} />
-                        ) : (
-                          <div className="w-full h-full bg-[#0A0A1F] flex items-center justify-center text-slate-500 text-sm flex-col gap-2">
-                             <svg className="w-8 h-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
-                             <span>历史记录模式下暂不支持 AI 对话</span>
-                          </div>
-                        )}
-                     </div>
-                   )}
-                </div>
+                    {/* CHAT REMOVED AS PER REQUEST */}
+                 </div>
 
                 {/* Right Column: Knowledge */}
                 <div className="lg:col-span-5 space-y-6">
@@ -640,12 +682,50 @@ const App: React.FC = () => {
                       <p className="text-slate-300 text-sm leading-7 text-justify">{result.summary}</p>
                    </GlassCard>
 
-                   {/* MINDMAP (DEEP MODE ONLY) */}
-                   {analysisMode === 'DEEP' && (
-                     <GlassCard title="知识图谱">
-                        <MindMap chart={result.mindMapMermaid} />
-                     </GlassCard>
-                   )}
+                    <GlassCard title="视频结构拆解 (8步法)" className="mb-6">
+                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-4">
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">1. 核心命题</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.coreProposition}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">2. 开头类型</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.openingType}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">3. 核心冲突</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.conflictStructure}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">4. 推进结构</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.progressionLogic}</p>
+                             </div>
+                          </div>
+                          <div className="space-y-4">
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">5. 中段钩子</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.psychologicalHook}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">6. 高潮金句</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.climaxSentence}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">7. 语言风格DNA</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.languageFeatures}</p>
+                             </div>
+                             <div className="p-3 bg-white/5 rounded border border-white/10">
+                                <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">8. 情绪曲线</h4>
+                                <p className="text-xs text-slate-300">{result.videoStructure.emotionalCurve}</p>
+                             </div>
+                          </div>
+                       </div>
+                       <div className="mt-4 p-3 bg-[#00D4FF]/5 rounded border border-[#00D4FF]/20">
+                          <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">观看回报</h4>
+                          <p className="text-xs text-slate-300 italic">{result.videoStructure.viewerReward}</p>
+                       </div>
+                    </GlassCard>
 
                    <GlassCard title="重点内容 (点击查看详情)">
                       <div className="space-y-3">
@@ -667,18 +747,130 @@ const App: React.FC = () => {
                       </div>
                    </GlassCard>
 
-                   <div className="p-6 rounded-xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 border border-indigo-500/20">
-                      <h3 className="text-indigo-400 font-bold mb-3 text-sm flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                        行动建议
+                   <div className="p-6 rounded-xl bg-gradient-to-br from-[#00D4FF]/10 to-[#8B5CF6]/10 border border-[#00D4FF]/20">
+                      <h3 className="text-[#00D4FF] font-bold mb-4 text-sm flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                          一键生成爆款
+                        </div>
                       </h3>
-                      <ul className="space-y-2">
-                         {result.actionItems.map((action, i) => (
-                           <li key={i} className="text-xs text-slate-300 flex gap-2">
-                             <span className="text-indigo-500">•</span> {action}
-                           </li>
-                         ))}
-                      </ul>
+                      
+                      <div className="space-y-6">
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">视频原始脚本</h4>
+                            <button 
+                              onClick={() => {
+                                navigator.clipboard.writeText(result.viralContent.script);
+                                setNotification({ message: "脚本已复制", type: 'success' });
+                              }}
+                              className="p-1 hover:text-[#00D4FF] transition-colors"
+                              title="复制脚本"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                            </button>
+                          </div>
+                          <div className="p-3 bg-black/30 rounded border border-white/5 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
+                            {result.viralContent.script}
+                          </div>
+                        </div>
+
+                        <div className="border-t border-white/5 pt-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">爆款文案生成</h4>
+                            <button 
+                              onClick={handleViralCopiesGenerate}
+                              disabled={isGeneratingViralCopies || !result.viralContent.script}
+                              className="px-3 py-1 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 text-[#8B5CF6] border border-[#8B5CF6]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
+                            >
+                              {isGeneratingViralCopies ? '生成中...' : '一键生成爆款文案'}
+                            </button>
+                          </div>
+
+                          {viralCopies.length > 0 && (
+                            <div className="space-y-4">
+                              <div className="space-y-2">
+                                {viralCopies.map((copy, i) => (
+                                  <div key={i} className="p-3 bg-white/5 rounded border border-white/10 text-xs text-slate-300 relative group/copy">
+                                     <button 
+                                       onClick={() => {
+                                         navigator.clipboard.writeText(copy);
+                                         setNotification({ message: "文案已复制", type: 'success' });
+                                       }}
+                                       className="absolute top-2 right-2 opacity-0 group-hover/copy:opacity-100 transition-opacity p-1 hover:text-[#00D4FF]"
+                                     >
+                                       <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                                     </button>
+                                     {copy}
+                                  </div>
+                                ))}
+                              </div>
+                              
+                              <ChatInterface 
+                                apiKey={apiKey} 
+                                context={`基于原始脚本：${result.viralContent.script}\n已生成的爆款文案：\n${viralCopies.join('\n---\n')}`}
+                                title="文案 AI 助手"
+                                height="300px"
+                                placeholder="要求修改文案或增加数量..."
+                                initialMessage="我是文案助手，您可以要求我修改上述文案，或者自定义生成的文案数量。"
+                                isReplacementMode={true}
+                                onUpdate={handleViralUpdate}
+                              />
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div className="border-t border-white/5 pt-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Sora 视频提示词</h4>
+                            <button 
+                              onClick={handleSoraGenerate}
+                              disabled={isGeneratingSora || !file}
+                              className="px-3 py-1 bg-[#00D4FF]/20 hover:bg-[#00D4FF]/30 text-[#00D4FF] border border-[#00D4FF]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
+                            >
+                              {isGeneratingSora ? '生成中...' : '一键生成提示词'}
+                            </button>
+                          </div>
+                          
+                          {soraPrompts.length > 0 && (
+                            <div className="space-y-4">
+                              <div className="space-y-3">
+                                {soraPrompts.map((p, i) => (
+                                  <div key={i} className="p-3 bg-white/5 rounded border border-white/10 space-y-2 group/sora relative">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider">{p.title}</span>
+                                      <button 
+                                        onClick={() => {
+                                          const textToCopy = p.fullPrompt;
+                                          navigator.clipboard.writeText(textToCopy);
+                                          setNotification({ message: "提示词已复制", type: 'success' });
+                                        }}
+                                        className="opacity-0 group-hover/sora:opacity-100 transition-opacity p-1 hover:text-[#00D4FF]"
+                                      >
+                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                                      </button>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 leading-relaxed italic line-clamp-3 group-hover/sora:line-clamp-none transition-all">
+                                      {p.fullPrompt}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+
+                              <ChatInterface 
+                                apiKey={apiKey} 
+                                context={`基于视频内容生成的 Sora 提示词：\n${soraPrompts.map(p => `${p.title}: ${p.fullPrompt}`).join('\n---\n')}`}
+                                title="Sora AI 助手"
+                                height="300px"
+                                placeholder="要求修改提示词..."
+                                initialMessage="我是 Sora 助手，您可以要求我修改上述提示词，例如改变画质、比例或镜头语言。"
+                                isReplacementMode={true}
+                                onUpdate={handleSoraUpdate}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
                    </div>
 
                 </div>
