@@ -484,7 +484,15 @@ export const chatWithContext = async (
   const ai = new GoogleGenAI({ apiKey });
   try {
     const systemInstruction = isReplacementMode 
-      ? `你是一个专业的文案/提示词优化专家。当前上下文：\n${context}\n\n用户希望你修改现有的内容。请直接返回修改后的完整内容。如果是多个选项，请以 JSON 数组格式返回，例如：["新文案1", "新文案2"] 或 [{"title": "标题", "fullPrompt": "内容"}]。如果是单段内容，直接返回文本。不要包含任何多余的解释或聊天。`
+      ? `你是一个专业的文案/提示词优化专家。当前上下文：\n${context}\n\n用户希望你修改现有的内容。
+      
+      规则：
+      1. 如果用户要求修改内容，必须返回 JSON 格式。
+      2. 如果是多个选项（如文案列表），请以 JSON 数组格式返回，例如：["新文案1", "新文案2"]。
+      3. 如果是单个文案，也请以 JSON 数组格式返回：["新文案内容"]。
+      4. 如果是 Sora 提示词，请以 JSON 对象格式返回，例如：{"title": "标题", "fullPrompt": "内容"}。
+      5. 如果用户只是在聊天或提问，请正常回答，不要返回 JSON。
+      6. 在返回 JSON 时，不要包含任何多余的解释或聊天。`
       : `你是一个专业的 AI 助手。当前上下文：\n${context}\n\n请基于此上下文回答用户问题。回答请简洁专业，使用中文。`;
 
     const response = await ai.models.generateContent({

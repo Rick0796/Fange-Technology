@@ -367,7 +367,7 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-[#0F0F23] text-white font-inter selection:bg-[#00D4FF] selection:text-black flex flex-col relative overflow-x-hidden">
       
       {/* Background Effect */}
-      {status !== AnalysisStatus.COMPLETED && status !== AnalysisStatus.ERROR && <ParticleBackground />}
+      <ParticleBackground />
 
       {/* Notifications */}
       {notification && (

@@ -85,19 +85,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         // If in replacement mode, try to parse and update
         if (isReplacementMode && onUpdate) {
           try {
-            // Try to find JSON in the response
-            const jsonMatch = responseText.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              onUpdate(parsed);
-              responseText = "已根据您的要求更新内容。";
-            } else if (!responseText.includes("{") && !responseText.includes("[")) {
-              // If it's just plain text and we expect a single string replacement
-              onUpdate(responseText);
-              responseText = "已根据您的要求更新内容。";
+            // Try to find JSON in the response (looking for code blocks first)
+            const jsonBlockMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+            const rawJsonMatch = responseText.match(/\[\s*\{[\s\S]*\}\s*\]|\{\s*[\s\S]*\s*\}|\[\s*"[\s\S]*"\s*\]/);
+            
+            const jsonString = jsonBlockMatch ? jsonBlockMatch[1] : (rawJsonMatch ? rawJsonMatch[0] : null);
+            
+            if (jsonString) {
+              try {
+                const parsed = JSON.parse(jsonString);
+                onUpdate(parsed);
+                
+                // If we found JSON, we might want to clean up the response text for the chat bubble
+                // but keep any actual conversational text the AI provided.
+                if (jsonBlockMatch) {
+                  responseText = responseText.replace(/```json\s*[\s\S]*?\s*```/, '').trim();
+                } else if (rawJsonMatch) {
+                  responseText = responseText.replace(rawJsonMatch[0], '').trim();
+                }
+                
+                if (!responseText) {
+                  responseText = "已根据您的要求更新内容。";
+                }
+              } catch (parseError) {
+                console.error("JSON Parse Error:", parseError);
+              }
             }
           } catch (e) {
-            console.error("Failed to parse replacement response:", e);
+            console.error("Failed to process replacement response:", e);
           }
         }
       } else if (videoFile) {
