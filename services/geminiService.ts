@@ -1,4 +1,5 @@
 
+// Gemini Service for Video Analysis and Content Generation
 import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult, AnalysisMode } from "../types";
 
@@ -145,13 +146,20 @@ export const analyzeVideoContent = async (
       作为专家，请分析视频。返回严格JSON。
       1. "summary": 200字核心摘要。
       2. "keyTakeaways": 5-8个知识点。
-      3. "mindMapMermaid": 生成 Mermaid.js 'graph TD' 代码。
-         IMPORTANT: 
-         - 节点ID必须是纯字母数字(A, B, C1, C2)。
-         - 节点标签文本中禁止包含括号()、中括号[]、引号""，请替换为普通空格或逗号。
-         - 保持结构简单清晰。
+      3. "videoStructure": 爆款文案完整拆解 8 步法，包含：
+         - "coreProposition": 核心命题（它真正想表达什么，一句话）。
+         - "openingType": 文案开头类型（冲突/利益/恐惧/反常识/代入/断言）。
+         - "conflictStructure": 矛盾冲突结构（两端是什么）。
+         - "progressionLogic": 推进逻辑（递进/对比/论证/举例/反转）。
+         - "psychologicalHook": 心理钩子（中段哪一句吸引注意力）。
+         - "climaxSentence": 高潮金句（最强记忆句）。
+         - "languageFeatures": 语言结构特征（句长、风格DNA）。
+         - "emotionalCurve": 情绪曲线（起承转合的情绪波动）。
+         - "viewerReward": 观看回报（观众得到什么）。
       4. "timestamps": 4-6个时间点。
-      5. "actionItems": 3个行动建议。
+      5. "viralContent": {
+         "script": 提取视频的原始脚本内容，确保与视频内容一致。
+      }
       简体中文。
     `;
   } else {
@@ -159,7 +167,8 @@ export const analyzeVideoContent = async (
       提取视频核心。仅JSON。
       1. summary: 50字简要摘要。
       2. keyTakeaways: 5个核心要点(point, detail 20字)。
-      3. actionItems: 2个建议。
+      3. videoStructure: 爆款文案结构拆解（coreProposition, openingType, conflictStructure, progressionLogic, psychologicalHook, climaxSentence, languageFeatures, emotionalCurve, viewerReward）。
+      4. viralContent: 爆款文案（无表情）、原始脚本。
       简体中文。
     `;
   }
@@ -184,11 +193,29 @@ export const analyzeVideoContent = async (
           }
         } 
       },
-      actionItems: { type: Type.ARRAY, items: { type: Type.STRING } }
+      videoStructure: {
+        type: Type.OBJECT,
+        properties: {
+          coreProposition: { type: Type.STRING },
+          openingType: { type: Type.STRING },
+          conflictStructure: { type: Type.STRING },
+          progressionLogic: { type: Type.STRING },
+          psychologicalHook: { type: Type.STRING },
+          climaxSentence: { type: Type.STRING },
+          languageFeatures: { type: Type.STRING },
+          emotionalCurve: { type: Type.STRING },
+          viewerReward: { type: Type.STRING }
+        }
+      },
+      viralContent: {
+        type: Type.OBJECT,
+        properties: {
+          script: { type: Type.STRING }
+        }
+      }
     };
 
     if (isDeep) {
-      schemaProperties.mindMapMermaid = { type: Type.STRING };
       schemaProperties.timestamps = {
         type: Type.ARRAY,
         items: {
@@ -253,11 +280,22 @@ export const analyzeVideoContent = async (
             detail: k.detail || "-"
           })) 
         : [],
-      mindMapMermaid: "", 
+      videoStructure: rawParsed.videoStructure || {
+        coreProposition: "未提取",
+        openingType: "未提取",
+        conflictStructure: "未提取",
+        progressionLogic: "未提取",
+        psychologicalHook: "未提取",
+        climaxSentence: "未提取",
+        languageFeatures: "未提取",
+        emotionalCurve: "未提取",
+        viewerReward: "未提取"
+      },
       timestamps: [],
-      actionItems: Array.isArray(rawParsed.actionItems)
-        ? rawParsed.actionItems.map((s: any) => String(s))
-        : [],
+      viralContent: {
+        copies: [],
+        script: rawParsed.viralContent?.script || "未提取脚本"
+      },
       fileUri: uploadedFileUri
     };
 
@@ -276,17 +314,6 @@ export const analyzeVideoContent = async (
             };
           })
         : [];
-
-      let m = rawParsed.mindMapMermaid || "";
-      if (m) {
-         m = m.replace(/```mermaid/g, '').replace(/```/g, '').trim();
-         if (!m.startsWith('graph')) {
-           m = `graph TD\n${m}`;
-         }
-         sanitizedResult.mindMapMermaid = m;
-      } else {
-         sanitizedResult.mindMapMermaid = "graph TD; A[解析完成] --> B[暂无结构];";
-      }
     }
 
     return sanitizedResult;
@@ -303,6 +330,7 @@ export const chatWithVideo = async (
   message: string,
   videoFile: File,
   apiKey: string,
+  analysisSummary?: string,
   existingFileUri?: string
 ) => {
   const ai = new GoogleGenAI({ apiKey });
@@ -315,13 +343,157 @@ export const chatWithVideo = async (
        videoPart = await fileToGenerativePart(videoFile); 
     }
 
+    const systemInstruction = analysisSummary 
+      ? `你是一个专业的视频分析助手。你已经分析了该视频，摘要如下：${analysisSummary}。请基于视频内容和此摘要回答用户问题。`
+      : "你是一个专业的视频分析助手，请基于视频内容回答用户问题。";
+
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.1-pro-preview',
       contents: {
         parts: [
             ...(existingFileUri ? [videoPart] : []), 
             ...history.map(h => ({ text: `${h.role === 'user' ? 'User' : 'Model'}: ${h.text}` })),
-            { text: `Answer in Chinese. Question: ${message}` }
+            { text: `Answer in Chinese. Context: ${systemInstruction}\nQuestion: ${message}` }
+        ]
+      }
+    });
+    return response.text || "无回复";
+  } catch (e: any) {
+    return `Error: ${e.message}`;
+  }
+};
+
+export const generateSoraPrompts = async (
+  videoFile: File,
+  apiKey: string,
+  existingFileUri?: string
+) => {
+  const ai = new GoogleGenAI({ apiKey });
+  let videoPart: any;
+
+  try {
+    if (existingFileUri) {
+      videoPart = { fileData: { mimeType: videoFile.type, fileUri: existingFileUri } };
+    } else {
+       videoPart = await fileToGenerativePart(videoFile); 
+    }
+
+    const prompt = `
+      你现在是一名顶级的电影导演和 AI 视频提示词专家。请基于视频内容，生成 **1个** 极其详细、结构化且专业的 Sora 视频生成提示词。
+      
+      要求：
+      1. **严禁重复**，严禁废话。内容必须高度凝练、专业且具有极强的视觉指导性。
+      2. **结构化呈现**：必须包含以下模块：
+         - [规格参数]：如 9:16, 10s, 4K, 写实质感。
+         - [风格设定]：如 高端商务、手持跟拍、电影级光影。
+         - [主角设定]：外貌、衣着、神态、核心气质。
+         - [场景设定]：环境细节、背景元素、氛围感。
+         - [分镜头脚本]：按时间轴（如 0-3s, 3-7s, 7-10s）详细描述动作、运镜和画面变化。
+         - [口播内容]：视频中的核心金句。
+         - [负面限制]：严禁出现的元素。
+      3. 语言必须全部使用中文。
+      4. 返回 JSON 对象，包含 "title" (简短标题) 和 "fullPrompt" (上述所有模块整合后的完整结构化文本)。
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+            videoPart,
+            { text: prompt }
+        ]
+      },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            fullPrompt: { type: Type.STRING }
+          }
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response");
+    const parsed = JSON.parse(text);
+    // Return as array of 1 to maintain compatibility with UI
+    return [parsed];
+  } catch (e: any) {
+    console.error("Sora Prompt Generation Error:", e);
+    throw new Error(`生成 Sora 提示词失败: ${e.message}`);
+  }
+};
+
+export const generateViralCopies = async (
+  originalScript: string,
+  apiKey: string,
+  count: number = 3
+) => {
+  const ai = new GoogleGenAI({ apiKey });
+  try {
+    const prompt = `
+      基于以下视频原始脚本，生成 ${count} 条不同的爆款短视频文案。
+      要求：
+      1. 文案结构必须与原始脚本一致（例如：钩子+内容+行动号召）。
+      2. 语言利落、有号召力，适合视频号/抖音等平台。
+      3. 禁止包含任何表情符号。
+      4. 简体中文。
+      
+      原始脚本：
+      ${originalScript}
+      
+      返回严格 JSON 数组，每个对象包含 "text" 字段。
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-pro-preview',
+      contents: { parts: [{ text: prompt }] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              text: { type: Type.STRING }
+            }
+          }
+        }
+      }
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response");
+    const parsed = JSON.parse(text);
+    return parsed.map((item: any) => item.text);
+  } catch (e: any) {
+    console.error("Viral Copy Generation Error:", e);
+    throw new Error(`生成爆款文案失败: ${e.message}`);
+  }
+};
+
+export const chatWithContext = async (
+  context: string,
+  history: { role: 'user' | 'model'; text: string }[],
+  message: string,
+  apiKey: string,
+  isReplacementMode: boolean = false
+) => {
+  const ai = new GoogleGenAI({ apiKey });
+  try {
+    const systemInstruction = isReplacementMode 
+      ? `你是一个专业的文案/提示词优化专家。当前上下文：\n${context}\n\n用户希望你修改现有的内容。请直接返回修改后的完整内容。如果是多个选项，请以 JSON 数组格式返回，例如：["新文案1", "新文案2"] 或 [{"title": "标题", "fullPrompt": "内容"}]。如果是单段内容，直接返回文本。不要包含任何多余的解释或聊天。`
+      : `你是一个专业的 AI 助手。当前上下文：\n${context}\n\n请基于此上下文回答用户问题。回答请简洁专业，使用中文。`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-pro-preview',
+      contents: {
+        parts: [
+          { text: systemInstruction },
+          ...history.map(h => ({ text: `${h.role === 'user' ? 'User' : 'Model'}: ${h.text}` })),
+          { text: message }
         ]
       }
     });
