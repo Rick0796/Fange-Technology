@@ -1,7 +1,7 @@
 
 // Main Application Component
 import React, { useState, useEffect, useRef } from 'react';
-import { AnalysisResult, AnalysisStatus, KeyTakeaway, HistoryItem, AnalysisMode, SoraPrompt } from './types';
+import { AnalysisResult, AnalysisStatus, VisualFeature, HistoryItem, AnalysisMode, SoraPrompt } from './types';
 import { analyzeVideoContent, generateSoraPrompts, generateViralCopies } from './services/geminiService';
 import VideoPlayer from './components/VideoPlayer';
 import ChatInterface from './components/ChatInterface';
@@ -32,7 +32,7 @@ const Toast: React.FC<{ message: string; type: 'success' | 'error' | 'info'; onC
 };
 
 // Modal for details
-const DetailModal: React.FC<{ item: KeyTakeaway | null; onClose: () => void }> = ({ item, onClose }) => {
+const DetailModal: React.FC<{ item: { point: string; detail: string } | null; onClose: () => void }> = ({ item, onClose }) => {
   if (!item) return null;
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
@@ -109,7 +109,7 @@ const App: React.FC = () => {
   const [isGeneratingViralCopies, setIsGeneratingViralCopies] = useState(false);
 
   // Detail Modal State
-  const [selectedTakeaway, setSelectedTakeaway] = useState<KeyTakeaway | null>(null);
+  const [selectedVisualFeature, setSelectedVisualFeature] = useState<VisualFeature | null>(null);
 
   // History & Mode State
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -334,14 +334,38 @@ const App: React.FC = () => {
   const handleSoraGenerate = async () => {
     if (!file || !result || isGeneratingSora) return;
     
+    console.log("Starting Sora prompt generation...", { hasFile: !!file, hasUri: !!result.fileUri, fileSize: file.size });
     setIsGeneratingSora(true);
+    setSoraPrompts([]); 
+    setNotification({ message: "正在深度分析视频并生成提示词，请稍候...", type: 'info' });
+    
     try {
-      // Use a faster model for prompt generation if needed, but sticking to 3.1 pro for quality
-      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri);
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 1);
+      console.log("Sora prompts generated:", prompts);
       setSoraPrompts(prompts);
       setNotification({ message: "Sora 提示词生成成功！", type: 'success' });
     } catch (e: any) {
       console.error("Sora generation error in App:", e);
+      setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
+    } finally {
+      setIsGeneratingSora(false);
+    }
+  };
+
+  const handleSoraSimilar = async () => {
+    if (!file || !result || isGeneratingSora) return;
+    
+    console.log("Starting Sora similar prompts generation...", { hasFile: !!file, hasUri: !!result.fileUri, fileSize: file.size });
+    setIsGeneratingSora(true);
+    setNotification({ message: "正在生成 3 条相似提示词，请稍候...", type: 'info' });
+    
+    try {
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 3);
+      console.log("Sora similar prompts generated:", prompts);
+      setSoraPrompts(prev => [...prev, ...prompts]);
+      setNotification({ message: "成功生成 3 条相似提示词！", type: 'success' });
+    } catch (e: any) {
+      console.error("Sora similar generation error in App:", e);
       setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
     } finally {
       setIsGeneratingSora(false);
@@ -430,7 +454,7 @@ const App: React.FC = () => {
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={handleLogoClick}>
              <span className="font-bold text-2xl tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-[#00D4FF] to-[#8B5CF6]">
-               凡哥科技
+               云智道Ai
              </span>
           </div>
           <div className="flex items-center gap-4">
@@ -638,7 +662,7 @@ const App: React.FC = () => {
                    <div className="flex gap-2 text-xs text-slate-400">
                      <span>{new Date().toLocaleDateString()}</span>
                      <span>•</span>
-                     <span>凡哥科技 AI 引擎 ({analysisMode === 'DEEP' ? '深度模式' : '极速模式'})</span>
+                     <span>云智道Ai AI 引擎 ({analysisMode === 'DEEP' ? '深度模式' : '极速模式'})</span>
                    </div>
                 </div>
                 <button onClick={reset} className="text-sm text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
@@ -728,18 +752,18 @@ const App: React.FC = () => {
                        </div>
                     </GlassCard>
 
-                   <GlassCard title="重点内容 (点击查看详情)">
+                   <GlassCard title="视觉特征拆解 (点击查看详情)">
                       <div className="space-y-3">
-                         {result.keyTakeaways.map((item, i) => (
+                         {result.visualFeatures.map((item, i) => (
                            <div 
                              key={i} 
-                             onClick={() => setSelectedTakeaway(item)}
+                             onClick={() => setSelectedVisualFeature(item)}
                              className="p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-[#00D4FF]/30 cursor-pointer transition-all group"
                            >
                               <div className="flex items-start gap-3">
                                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[#00D4FF]/10 text-[#00D4FF] flex items-center justify-center text-xs font-bold mt-0.5">{i+1}</span>
                                  <div>
-                                   <p className="text-sm font-medium text-slate-200 group-hover:text-white">{item.point}</p>
+                                   <p className="text-sm font-medium text-slate-200 group-hover:text-white">{item.feature}</p>
                                    <p className="text-xs text-slate-500 mt-1 truncate group-hover:text-slate-400">点击查看详细解析...</p>
                                  </div>
                               </div>
@@ -784,7 +808,7 @@ const App: React.FC = () => {
                               disabled={isGeneratingViralCopies || !result.viralContent.script}
                               className="px-3 py-1 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 text-[#8B5CF6] border border-[#8B5CF6]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
                             >
-                              {isGeneratingViralCopies ? '生成中...' : '一键生成爆款文案'}
+                              {isGeneratingViralCopies ? '生成中...' : (viralCopies.length > 0 ? '重新生成文案' : '一键生成爆款文案')}
                             </button>
                           </div>
 
@@ -814,7 +838,7 @@ const App: React.FC = () => {
                                 height="300px"
                                 placeholder="要求修改文案或增加数量..."
                                 initialMessage="我是文案助手，您可以要求我修改上述文案，或者自定义生成的文案数量。"
-                                isReplacementMode={true}
+                                isReplacementMode={false}
                                 onUpdate={handleViralUpdate}
                               />
                             </div>
@@ -824,13 +848,34 @@ const App: React.FC = () => {
                         <div className="border-t border-white/5 pt-4">
                           <div className="flex items-center justify-between mb-3">
                             <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Sora 视频提示词</h4>
-                            <button 
-                              onClick={handleSoraGenerate}
-                              disabled={isGeneratingSora || !file}
-                              className="px-3 py-1 bg-[#00D4FF]/20 hover:bg-[#00D4FF]/30 text-[#00D4FF] border border-[#00D4FF]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
-                            >
-                              {isGeneratingSora ? '生成中...' : '一键生成提示词'}
-                            </button>
+                            <div className="flex gap-2">
+                              {soraPrompts.length > 0 ? (
+                                <>
+                                  <button 
+                                    onClick={handleSoraGenerate}
+                                    disabled={isGeneratingSora || !file}
+                                    className="px-3 py-1 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
+                                  >
+                                    {isGeneratingSora ? '处理中...' : '重新生成'}
+                                  </button>
+                                  <button 
+                                    onClick={handleSoraSimilar}
+                                    disabled={isGeneratingSora || !file}
+                                    className="px-3 py-1 bg-[#00D4FF]/20 hover:bg-[#00D4FF]/30 text-[#00D4FF] border border-[#00D4FF]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
+                                  >
+                                    {isGeneratingSora ? '处理中...' : '继续生成3条相似'}
+                                  </button>
+                                </>
+                              ) : (
+                                <button 
+                                  onClick={handleSoraGenerate}
+                                  disabled={isGeneratingSora || !file}
+                                  className="px-3 py-1 bg-[#00D4FF]/20 hover:bg-[#00D4FF]/30 text-[#00D4FF] border border-[#00D4FF]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  {isGeneratingSora ? '生成中...' : '一键生成提示词'}
+                                </button>
+                              )}
+                            </div>
                           </div>
                           
                           {soraPrompts.length > 0 && (
@@ -865,7 +910,7 @@ const App: React.FC = () => {
                                 height="300px"
                                 placeholder="要求修改提示词..."
                                 initialMessage="我是 Sora 助手，您可以要求我修改上述提示词，例如改变画质、比例或镜头语言。"
-                                isReplacementMode={true}
+                                isReplacementMode={false}
                                 onUpdate={handleSoraUpdate}
                               />
                             </div>
@@ -880,8 +925,11 @@ const App: React.FC = () => {
         )}
 
         {/* Detail Modal */}
-        {selectedTakeaway && (
-           <DetailModal item={selectedTakeaway} onClose={() => setSelectedTakeaway(null)} />
+        {selectedVisualFeature && (
+           <DetailModal 
+             item={{ point: selectedVisualFeature.feature, detail: selectedVisualFeature.description }} 
+             onClose={() => setSelectedVisualFeature(null)} 
+           />
         )}
 
       </main>
@@ -921,7 +969,7 @@ const App: React.FC = () => {
           </div>
 
           <p className="text-slate-500 text-xs tracking-wider">
-             Version 1.0.7-test1 | © 2025 Fange Technology. All rights reserved.
+             Version 1.1 | © 2026 Yunzhidao Ai. All rights reserved.
           </p>
         </div>
       </footer>

@@ -15,9 +15,9 @@ export interface Timestamp {
   description: string;
 }
 
-export interface KeyTakeaway {
-  point: string;
-  detail: string;
+export interface VisualFeature {
+  feature: string;
+  description: string;
 }
 
 export interface SoraPrompt {
@@ -45,7 +45,7 @@ export interface VideoStructure {
 
 export interface AnalysisResult {
   summary: string;
-  keyTakeaways: KeyTakeaway[];
+  visualFeatures: VisualFeature[];
   videoStructure: VideoStructure;
   timestamps: Timestamp[];
   viralContent: ViralContent;

@@ -145,7 +145,7 @@ export const analyzeVideoContent = async (
      prompt = `
       作为专家，请分析视频。返回严格JSON。
       1. "summary": 200字核心摘要。
-      2. "keyTakeaways": 5-8个知识点。
+      2. "visualFeatures": 5-8个视觉特征拆解（包含色彩矩阵、构图方式、光影物理、关键道具等）。
       3. "videoStructure": 爆款文案完整拆解 8 步法，包含：
          - "coreProposition": 核心命题（它真正想表达什么，一句话）。
          - "openingType": 文案开头类型（冲突/利益/恐惧/反常识/代入/断言）。
@@ -166,7 +166,7 @@ export const analyzeVideoContent = async (
     prompt = `
       提取视频核心。仅JSON。
       1. summary: 50字简要摘要。
-      2. keyTakeaways: 5个核心要点(point, detail 20字)。
+      2. visualFeatures: 5个视觉特征拆解(feature, description 20字)。
       3. videoStructure: 爆款文案结构拆解（coreProposition, openingType, conflictStructure, progressionLogic, psychologicalHook, climaxSentence, languageFeatures, emotionalCurve, viewerReward）。
       4. viralContent: 爆款文案（无表情）、原始脚本。
       简体中文。
@@ -183,13 +183,13 @@ export const analyzeVideoContent = async (
 
     const schemaProperties: any = {
       summary: { type: Type.STRING },
-      keyTakeaways: { 
+      visualFeatures: { 
         type: Type.ARRAY, 
         items: { 
           type: Type.OBJECT, 
           properties: {
-            point: { type: Type.STRING },
-            detail: { type: Type.STRING }
+            feature: { type: Type.STRING },
+            description: { type: Type.STRING }
           }
         } 
       },
@@ -274,10 +274,10 @@ export const analyzeVideoContent = async (
 
     const sanitizedResult: AnalysisResult = {
       summary: rawParsed.summary || "未生成摘要",
-      keyTakeaways: Array.isArray(rawParsed.keyTakeaways) 
-        ? rawParsed.keyTakeaways.map((k: any) => ({
-            point: k.point || "要点",
-            detail: k.detail || "-"
+      visualFeatures: Array.isArray(rawParsed.visualFeatures) 
+        ? rawParsed.visualFeatures.map((k: any) => ({
+            feature: k.feature || "特征",
+            description: k.description || "-"
           })) 
         : [],
       videoStructure: rawParsed.videoStructure || {
@@ -348,7 +348,7 @@ export const chatWithVideo = async (
       : "你是一个专业的视频分析助手，请基于视频内容回答用户问题。";
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
+      model: 'gemini-2.5-flash',
       contents: {
         parts: [
             ...(existingFileUri ? [videoPart] : []), 
@@ -359,14 +359,15 @@ export const chatWithVideo = async (
     });
     return response.text || "无回复";
   } catch (e: any) {
-    return `Error: ${e.message}`;
+    return `Error: ${e?.message || e || "未知错误"}`;
   }
 };
 
 export const generateSoraPrompts = async (
   videoFile: File,
   apiKey: string,
-  existingFileUri?: string
+  existingFileUri?: string,
+  count: number = 1
 ) => {
   const ai = new GoogleGenAI({ apiKey });
   let videoPart: any;
@@ -379,20 +380,30 @@ export const generateSoraPrompts = async (
     }
 
     const prompt = `
-      你现在是一名顶级的电影导演和 AI 视频提示词专家。请基于视频内容，生成 **1个** 极其详细、结构化且专业的 Sora 视频生成提示词。
+      你现在是一名顶级的短视频导演和 AI 视频提示词专家。请**首先深度分析**视频的视觉流派、人物气场和环境逻辑，然后生成 **${count}** 个极其详细、结构化且专业的 Sora 视频生成提示词。
       
-      要求：
-      1. **严禁重复**，严禁废话。内容必须高度凝练、专业且具有极强的视觉指导性。
-      2. **结构化呈现**：必须包含以下模块：
-         - [规格参数]：如 9:16, 10s, 4K, 写实质感。
-         - [风格设定]：如 高端商务、手持跟拍、电影级光影。
-         - [主角设定]：外貌、衣着、神态、核心气质。
-         - [场景设定]：环境细节、背景元素、氛围感。
-         - [分镜头脚本]：按时间轴（如 0-3s, 3-7s, 7-10s）详细描述动作、运镜和画面变化。
-         - [口播内容]：视频中的核心金句。
-         - [负面限制]：严禁出现的元素。
-      3. 语言必须全部使用中文。
-      4. 返回 JSON 对象，包含 "title" (简短标题) 和 "fullPrompt" (上述所有模块整合后的完整结构化文本)。
+      ### 动态自适应分析要求：
+      1. **视觉流派判定**：识别视频是“真实手机/视频号抓拍”还是“专业摄影机/电影级拍摄”。根据判定结果自动选择质感描述（如：轻微手持呼吸感 vs 稳定器运镜）。
+      2. **人物气场建模**：**拒绝套路**。根据视频中人物的真实表现，精准拆解其心理状态（如：亲和、严谨、忧郁、知性或强势）。
+      3. **环境逻辑关联**：识别背景的作用。是作为“生活化陪衬”还是“专业氛围感”来源。
+      
+      ### 提示词结构化框架：
+      每个提示词必须严格包含以下模块：
+      - [规格参数]：比例、时长、分辨率。**动态填充质感**（如：真实手机拍摄质感、高帧率、电影级景深等）。
+      - [风格设定]：基于视频流派的整体调性描述（如：深夜沉浸感、清晨生活气息、高端发布会氛围）。
+      - [主角设定]：基于参考图，描述脸型、发型。重点描述其**特有的眼神、神态和心理气场**。描述着装、麦克风细节。
+      - [场景设定]：空间建模。增加**生命力元素**（如：漂浮微尘、远处人影、窗外霓虹、自然透光）。
+      - [分镜头脚本]：按时间轴拆解动作与运镜。运镜必须匹配视觉流派（手机感 vs 电影感）。
+      - [表演要求]：描述口播节奏（如：短句连击、慢条斯理）、手势幅度、眼神落点。
+      - [口播内容]：逐句清晰的中文口播。
+      - [文字与避雷规则]：**严禁生成字幕**，背景文字必须模糊不可读，确保画面干净。
+      - [负面限制]：严禁卡通、科幻、字幕乱码、人物变形、水印。
+      
+      ### 差异化生成策略：
+      - 如果 count 为 1，生成一个 **1:1 复刻提示词**。目标是极致还原视频的动作轨迹、环境氛围和人物气场。标题必须包含 "1:1 复刻提示词"。
+      - 如果 count 为 3，生成 1 个 **1:1 复刻提示词** 和 2 个 **发散优化提示词**。发散优化提示词应保持约 80% 的还原度，但在场景、服装细节或氛围感上可以有适度的创意发散。标题必须分别包含 "1:1 复刻提示词" 或 "发散优化提示词"。
+      
+      语言必须全部使用中文。返回 JSON 数组，每个对象包含 "title" 和 "fullPrompt"。
     `;
 
     const response = await ai.models.generateContent({
@@ -406,10 +417,13 @@ export const generateSoraPrompts = async (
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            fullPrompt: { type: Type.STRING }
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              fullPrompt: { type: Type.STRING }
+            }
           }
         }
       }
@@ -418,8 +432,7 @@ export const generateSoraPrompts = async (
     const text = response.text;
     if (!text) throw new Error("No response");
     const parsed = JSON.parse(text);
-    // Return as array of 1 to maintain compatibility with UI
-    return [parsed];
+    return Array.isArray(parsed) ? parsed : [parsed];
   } catch (e: any) {
     console.error("Sora Prompt Generation Error:", e);
     throw new Error(`生成 Sora 提示词失败: ${e.message}`);
@@ -448,7 +461,7 @@ export const generateViralCopies = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
+      model: 'gemini-2.5-flash',
       contents: { parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
@@ -483,20 +496,44 @@ export const chatWithContext = async (
 ) => {
   const ai = new GoogleGenAI({ apiKey });
   try {
-    const systemInstruction = isReplacementMode 
-      ? `你是一个专业的文案/提示词优化专家。当前上下文：\n${context}\n\n用户希望你修改现有的内容。
+    const isSoraContext = context.includes("Sora") || context.includes("提示词");
+    
+    const soraInstruction = `
+      你现在是一名顶级的电影导演和 AI 视频提示词专家。
+      用户希望你修改现有的 Sora 提示词。
       
       规则：
-      1. 如果用户要求修改内容，必须返回 JSON 格式。
-      2. 如果是多个选项（如文案列表），请以 JSON 数组格式返回，例如：["新文案1", "新文案2"]。
-      3. 如果是单个文案，也请以 JSON 数组格式返回：["新文案内容"]。
-      4. 如果是 Sora 提示词，请以 JSON 对象格式返回，例如：{"title": "标题", "fullPrompt": "内容"}。
-      5. 如果用户只是在聊天或提问，请正常回答，不要返回 JSON。
-      6. 在返回 JSON 时，不要包含任何多余的解释或聊天。`
-      : `你是一个专业的 AI 助手。当前上下文：\n${context}\n\n请基于此上下文回答用户问题。回答请简洁专业，使用中文。`;
+      1. 必须返回 JSON 格式。
+      2. 必须严格遵守结构化标准（规格参数、风格设定、主角设定、场景设定、分镜头脚本、口播内容、负面限制）。
+      3. 语言必须全部使用中文，严禁出现英文（除非是专业术语如 4K）。
+      4. 返回 JSON 对象：{"title": "标题", "fullPrompt": "完整结构化文本"}。
+      5. 不要包含任何多余的解释。
+    `;
+
+    const viralInstruction = `
+      你是一个专业的文案优化专家。
+      请基于当前生成的文案和用户要求提供优化建议。
+      
+      规则：
+      1. 保持专业、简洁。
+      2. 语言必须全部使用中文。
+      3. 不要包含任何多余的解释。
+    `;
+
+    const systemInstruction = isReplacementMode 
+      ? `你是一个专业的优化专家。当前上下文：\n${context}\n\n${isSoraContext ? soraInstruction : viralInstruction}`
+      : `你是一个专业的 AI 助手。当前上下文：\n${context}\n\n
+      
+      ${isSoraContext ? '你现在的身份是顶级电影导演和 Sora 提示词专家。请基于上述上下文，以专业、深度的视角回答用户关于提示词优化的问题。' : '请基于此上下文回答用户问题。'}
+      
+      要求：
+      1. 必须使用中文回答。
+      2. 保持专业、简洁。
+      3. 如果用户要求修改建议，请以文字形式给出建议，不要返回 JSON（除非明确要求）。
+      4. 严禁输出英文（除非是专业术语）。`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
+      model: 'gemini-2.5-flash',
       contents: {
         parts: [
           { text: systemInstruction },
@@ -507,6 +544,6 @@ export const chatWithContext = async (
     });
     return response.text || "无回复";
   } catch (e: any) {
-    return `Error: ${e.message}`;
+    return `Error: ${e?.message || e || "未知错误"}`;
   }
 };
