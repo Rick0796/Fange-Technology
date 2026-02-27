@@ -273,7 +273,16 @@ const App: React.FC = () => {
           setNotification({ message: "任务已取消", type: 'info' });
           reset();
       } else {
-          setError(e.message);
+          let errorMsg = e.message || "分析失败，请重试";
+          
+          // Friendly error for expired/invalid API Key
+          if (errorMsg.includes("API key expired") || errorMsg.includes("API_KEY_INVALID")) {
+            errorMsg = "⚠️ API Key 已过期或无效，请在 Vercel 环境变量中更新 GEMINI_API_KEY 并重新部署。";
+          } else if (errorMsg.includes("quota") || errorMsg.includes("429")) {
+            errorMsg = "⚠️ 触发频率限制，请稍后再试或检查 API 配额。";
+          }
+          
+          setError(errorMsg);
           setStatus(AnalysisStatus.ERROR);
       }
     } finally {
@@ -340,7 +349,7 @@ const App: React.FC = () => {
     setNotification({ message: "正在深度分析视频并生成提示词，请稍候...", type: 'info' });
     
     try {
-      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 1);
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 1, result.summary);
       console.log("Sora prompts generated:", prompts);
       setSoraPrompts(prompts);
       setNotification({ message: "Sora 提示词生成成功！", type: 'success' });
@@ -360,7 +369,7 @@ const App: React.FC = () => {
     setNotification({ message: "正在生成 3 条相似提示词，请稍候...", type: 'info' });
     
     try {
-      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 3);
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 3, result.summary);
       console.log("Sora similar prompts generated:", prompts);
       setSoraPrompts(prev => [...prev, ...prompts]);
       setNotification({ message: "成功生成 3 条相似提示词！", type: 'success' });

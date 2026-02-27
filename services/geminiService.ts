@@ -113,8 +113,8 @@ export const analyzeVideoContent = async (
   try {
     if (signal?.aborted) throw new Error("取消操作");
 
-    // Threshold 20MB
-    if (file.size > 20 * 1024 * 1024) {
+    // Threshold 5MB for better mobile stability
+    if (file.size > 5 * 1024 * 1024) {
       if (onProgress) onProgress('uploading', 0);
       
       uploadedFileUri = await uploadFileToGemini(file, ai, (p) => {
@@ -367,7 +367,8 @@ export const generateSoraPrompts = async (
   videoFile: File,
   apiKey: string,
   existingFileUri?: string,
-  count: number = 1
+  count: number = 1,
+  analysisSummary?: string
 ) => {
   const ai = new GoogleGenAI({ apiKey });
   let videoPart: any;
@@ -380,7 +381,10 @@ export const generateSoraPrompts = async (
     }
 
     const prompt = `
-      你现在是一名顶级的短视频导演和 AI 视频提示词专家。请**首先深度分析**视频的视觉流派、人物气场和环境逻辑，然后生成 **${count}** 个极其详细、结构化且专业的 Sora 视频生成提示词。
+      你现在是一名顶级的短视频导演和 AI 视频提示词专家。
+      ${analysisSummary ? `参考先前的视频分析摘要：${analysisSummary}` : ''}
+      
+      请**首先深度分析**视频的视觉流派、人物气场和环境逻辑，然后生成 **${count}** 个极其详细、结构化且专业的 Sora 视频生成提示词。
       
       ### 动态自适应分析要求：
       1. **视觉流派判定**：识别视频是“真实手机/视频号抓拍”还是“专业摄影机/电影级拍摄”。根据判定结果自动选择质感描述（如：轻微手持呼吸感 vs 稳定器运镜）。
@@ -406,7 +410,7 @@ export const generateSoraPrompts = async (
       语言必须全部使用中文。返回 JSON 数组，每个对象包含 "title" 和 "fullPrompt"。
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await cancellable(ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: {
         parts: [
@@ -427,7 +431,7 @@ export const generateSoraPrompts = async (
           }
         }
       }
-    });
+    }));
 
     const text = response.text;
     if (!text) throw new Error("No response");

@@ -10,6 +10,18 @@ export default defineConfig(({ mode }) => {
         host: '0.0.0.0',
       },
       plugins: [react()],
+      build: {
+        chunkSizeWarningLimit: 1000,
+        rollupOptions: {
+          output: {
+            manualChunks: {
+              'vendor-ai': ['@google/genai'],
+              'vendor-react': ['react', 'react-dom'],
+              'vendor-ui': ['lucide-react', 'motion', 'react-markdown'],
+            }
+          }
+        }
+      },
       define: {
         'process.env.API_KEY': JSON.stringify(env.VITE_GEMINI_API_KEY || env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.VITE_GEMINI_API_KEY || env.GEMINI_API_KEY)
