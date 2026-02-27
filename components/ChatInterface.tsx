@@ -75,12 +75,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setInput('');
     setIsLoading(true);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
+
     try {
       const history = messages.map(m => ({ role: m.role, text: m.text }));
       let responseText = "";
       
       if (context) {
-        responseText = await chatWithContext(context, history, input, apiKey, isReplacementMode);
+        responseText = await chatWithContext(context, history, input, apiKey, isReplacementMode, controller.signal);
+        clearTimeout(timeoutId);
         
         // If in replacement mode, try to parse and update
         if (isReplacementMode && onUpdate) {
@@ -128,12 +132,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, aiMsg]);
-    } catch (error) {
+    } catch (error: any) {
+      clearTimeout(timeoutId);
       console.error(error);
+      const isAbort = error.name === 'AbortError' || error.message === '取消操作';
       const errorMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: "错误：无法连接到智能核心。",
+        text: isAbort ? "错误：请求超时或已取消，请重试。" : "错误：无法连接到智能核心。",
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, errorMsg]);

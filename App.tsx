@@ -325,10 +325,15 @@ const App: React.FC = () => {
   };
 
   const handleSoraUpdate = (data: any) => {
+    const sanitize = (item: any) => ({
+      title: item.title || item.name || "未命名提示词",
+      fullPrompt: item.fullPrompt || item.prompt || item.content || ""
+    });
+
     if (Array.isArray(data)) {
-      setSoraPrompts(data);
-    } else if (data.title && data.fullPrompt) {
-      setSoraPrompts([data]);
+      setSoraPrompts(data.map(sanitize));
+    } else if (typeof data === 'object' && data !== null) {
+      setSoraPrompts([sanitize(data)]);
     }
   };
 
@@ -348,14 +353,20 @@ const App: React.FC = () => {
     setSoraPrompts([]); 
     setNotification({ message: "正在深度分析视频并生成提示词，请稍候...", type: 'info' });
     
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    
     try {
-      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 1, result.summary);
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 1, result.summary, controller.signal);
+      clearTimeout(timeoutId);
       console.log("Sora prompts generated:", prompts);
       setSoraPrompts(prompts);
       setNotification({ message: "Sora 提示词生成成功！", type: 'success' });
     } catch (e: any) {
+      clearTimeout(timeoutId);
       console.error("Sora generation error in App:", e);
-      setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
+      const msg = e.name === 'AbortError' || e.message === '取消操作' ? "生成超时或已取消，请重试" : `生成失败: ${e.message}`;
+      setNotification({ message: msg, type: 'error' });
     } finally {
       setIsGeneratingSora(false);
     }
@@ -368,14 +379,20 @@ const App: React.FC = () => {
     setIsGeneratingSora(true);
     setNotification({ message: "正在生成 3 条相似提示词，请稍候...", type: 'info' });
     
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for 3 prompts
+    
     try {
-      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 3, result.summary);
+      const prompts = await generateSoraPrompts(file, apiKey, result.fileUri, 3, result.summary, controller.signal);
+      clearTimeout(timeoutId);
       console.log("Sora similar prompts generated:", prompts);
       setSoraPrompts(prev => [...prev, ...prompts]);
       setNotification({ message: "成功生成 3 条相似提示词！", type: 'success' });
     } catch (e: any) {
+      clearTimeout(timeoutId);
       console.error("Sora similar generation error in App:", e);
-      setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
+      const msg = e.name === 'AbortError' || e.message === '取消操作' ? "生成超时或已取消，请重试" : `生成失败: ${e.message}`;
+      setNotification({ message: msg, type: 'error' });
     } finally {
       setIsGeneratingSora(false);
     }
@@ -896,9 +913,35 @@ const App: React.FC = () => {
                                       <span className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider">{p.title}</span>
                                       <button 
                                         onClick={() => {
-                                          const textToCopy = p.fullPrompt;
-                                          navigator.clipboard.writeText(textToCopy);
-                                          setNotification({ message: "提示词已复制", type: 'success' });
+                                          const textToCopy = p.fullPrompt || "";
+                                          if (!textToCopy) {
+                                            setNotification({ message: "复制失败：内容为空", type: 'error' });
+                                            return;
+                                          }
+                                          
+                                          // Fallback for mobile browsers
+                                          if (navigator.clipboard && window.isSecureContext) {
+                                            navigator.clipboard.writeText(textToCopy)
+                                              .then(() => setNotification({ message: "提示词已复制", type: 'success' }))
+                                              .catch(() => {
+                                                // Manual fallback if clipboard API fails
+                                                const textArea = document.createElement("textarea");
+                                                textArea.value = textToCopy;
+                                                document.body.appendChild(textArea);
+                                                textArea.select();
+                                                document.execCommand("copy");
+                                                document.body.removeChild(textArea);
+                                                setNotification({ message: "提示词已复制", type: 'success' });
+                                              });
+                                          } else {
+                                            const textArea = document.createElement("textarea");
+                                            textArea.value = textToCopy;
+                                            document.body.appendChild(textArea);
+                                            textArea.select();
+                                            document.execCommand("copy");
+                                            document.body.removeChild(textArea);
+                                            setNotification({ message: "提示词已复制", type: 'success' });
+                                          }
                                         }}
                                         className="opacity-0 group-hover/sora:opacity-100 transition-opacity p-1 hover:text-[#00D4FF]"
                                       >
@@ -978,7 +1021,7 @@ const App: React.FC = () => {
           </div>
 
           <p className="text-slate-500 text-xs tracking-wider">
-             Version 1.1 | © 2026 Yunzhidao Ai. All rights reserved.
+             Version 1.2 | © 2026 Yunzhidao Ai. All rights reserved.
           </p>
         </div>
       </footer>

@@ -368,7 +368,8 @@ export const generateSoraPrompts = async (
   apiKey: string,
   existingFileUri?: string,
   count: number = 1,
-  analysisSummary?: string
+  analysisSummary?: string,
+  signal?: AbortSignal
 ) => {
   const ai = new GoogleGenAI({ apiKey });
   let videoPart: any;
@@ -431,12 +432,32 @@ export const generateSoraPrompts = async (
           }
         }
       }
-    }));
+    }), signal);
 
     const text = response.text;
     if (!text) throw new Error("No response");
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [parsed];
+    
+    // Robust JSON Parsing for Sora Prompts
+    let rawParsed: any;
+    try {
+      rawParsed = JSON.parse(text);
+    } catch (e) {
+      const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      try {
+        rawParsed = JSON.parse(cleanedText);
+      } catch (e2) {
+        console.error("Sora JSON Parse Failed", e2, text);
+        throw new Error("AI 返回数据格式错误，请重试");
+      }
+    }
+
+    const items = Array.isArray(rawParsed) ? rawParsed : [rawParsed];
+    
+    // Ensure keys are correct (AI sometimes hallucinates 'prompt' instead of 'fullPrompt')
+    return items.map((item: any) => ({
+      title: item.title || item.name || "未命名提示词",
+      fullPrompt: item.fullPrompt || item.prompt || item.content || "生成内容为空"
+    }));
   } catch (e: any) {
     console.error("Sora Prompt Generation Error:", e);
     throw new Error(`生成 Sora 提示词失败: ${e.message}`);
@@ -496,7 +517,8 @@ export const chatWithContext = async (
   history: { role: 'user' | 'model'; text: string }[],
   message: string,
   apiKey: string,
-  isReplacementMode: boolean = false
+  isReplacementMode: boolean = false,
+  signal?: AbortSignal
 ) => {
   const ai = new GoogleGenAI({ apiKey });
   try {
@@ -511,7 +533,7 @@ export const chatWithContext = async (
       2. 必须严格遵守结构化标准（规格参数、风格设定、主角设定、场景设定、分镜头脚本、口播内容、负面限制）。
       3. 语言必须全部使用中文，严禁出现英文（除非是专业术语如 4K）。
       4. 返回 JSON 对象：{"title": "标题", "fullPrompt": "完整结构化文本"}。
-      5. 不要包含任何多余的解释。
+      5. 如果是修改建议，请在 JSON 之外提供简短说明，但 JSON 本身必须完整。
     `;
 
     const viralInstruction = `
@@ -536,7 +558,7 @@ export const chatWithContext = async (
       3. 如果用户要求修改建议，请以文字形式给出建议，不要返回 JSON（除非明确要求）。
       4. 严禁输出英文（除非是专业术语）。`;
 
-    const response = await ai.models.generateContent({
+    const response = await cancellable(ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: {
         parts: [
@@ -545,7 +567,7 @@ export const chatWithContext = async (
           { text: message }
         ]
       }
-    });
+    }), signal);
     return response.text || "无回复";
   } catch (e: any) {
     return `Error: ${e?.message || e || "未知错误"}`;
