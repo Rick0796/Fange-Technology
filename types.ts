@@ -63,6 +63,24 @@ export interface HistoryItem {
   id: string;
   date: string;
   fileName: string;
-  result: AnalysisResult;
-  mode: AnalysisMode;
+  result?: AnalysisResult;
+  copyResult?: CopyAnalysisResult;
+  mode?: AnalysisMode;
+  type: 'VIDEO' | 'COPY';
+}
+
+export interface CopyAnalysisResult {
+  analysis: {
+    hook: string;
+    contrast: string;
+    value: string;
+    trust: string;
+    cta: string;
+    targetAudience: string;
+    sellingPoints: string;
+  };
+  generatedScripts: {
+    title: string;
+    content: string;
+  }[];
 }

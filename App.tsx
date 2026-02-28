@@ -1,8 +1,8 @@
 
 // Main Application Component
 import React, { useState, useEffect, useRef } from 'react';
-import { AnalysisResult, AnalysisStatus, VisualFeature, HistoryItem, AnalysisMode, SoraPrompt } from './types';
-import { analyzeVideoContent, generateSoraPrompts, generateViralCopies } from './services/geminiService';
+import { AnalysisResult, AnalysisStatus, VisualFeature, HistoryItem, AnalysisMode, SoraPrompt, CopyAnalysisResult } from './types';
+import { analyzeVideoContent, generateSoraPrompts, generateViralCopies, analyzeAndGenerateCopy, refineCopyAnalysis } from './services/geminiService';
 import VideoPlayer from './components/VideoPlayer';
 import ChatInterface from './components/ChatInterface';
 import ProcessingVisualizer from './components/ProcessingVisualizer';
@@ -116,6 +116,18 @@ const App: React.FC = () => {
   const [showHistory, setShowHistory] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('FAST');
 
+  // Copy Analysis State
+  const [isCopyAnalysisMode, setIsCopyAnalysisMode] = useState(false);
+  const [copyInput, setCopyInput] = useState('');
+  const [industryInput, setIndustryInput] = useState('');
+  const [needsInput, setNeedsInput] = useState('');
+  const [userBackgroundInput, setUserBackgroundInput] = useState('');
+  const [copyRefineInput, setCopyRefineInput] = useState('');
+  const [copyAnalysisResult, setCopyAnalysisResult] = useState<CopyAnalysisResult | null>(null);
+  const [isAnalyzingCopy, setIsAnalyzingCopy] = useState(false);
+  const [isRefiningCopy, setIsRefiningCopy] = useState(false);
+  const copyAbortControllerRef = useRef<AbortController | null>(null);
+
   // Notifications
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
@@ -201,6 +213,8 @@ const App: React.FC = () => {
   };
 
   const handleLogoClick = () => {
+    setIsCopyAnalysisMode(false);
+    setCopyAnalysisResult(null);
     // If working, go to background mode (home screen)
     if (status === AnalysisStatus.UPLOADING || status === AnalysisStatus.ANALYZING) {
         setIsBackgroundMode(true);
@@ -260,7 +274,8 @@ const App: React.FC = () => {
         date: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         fileName: file.name,
         result: data,
-        mode: mode
+        mode: mode,
+        type: 'VIDEO'
       };
       
       const updatedHistory = [newHistoryItem, ...history];
@@ -277,9 +292,9 @@ const App: React.FC = () => {
           
           // Friendly error for expired/invalid API Key
           if (errorMsg.includes("API key expired") || errorMsg.includes("API_KEY_INVALID")) {
-            errorMsg = "⚠️ API Key 已过期或无效，请在 Vercel 环境变量中更新 GEMINI_API_KEY 并重新部署。";
-          } else if (errorMsg.includes("quota") || errorMsg.includes("429")) {
-            errorMsg = "⚠️ 触发频率限制，请稍后再试或检查 API 配额。";
+            errorMsg = "⚠️ API Key 已失效。请去 aistudio.google.com 重新生成一个 Key，并在 Vercel 中更新部署。";
+          } else if (errorMsg.includes("quota") || errorMsg.includes("429") || errorMsg.includes("limit")) {
+            errorMsg = "⚠️ 免费额度已耗尽。Gemini 免费版有频率限制，请等待 1 分钟后再试，或更换 Flash 模型 Key。";
           }
           
           setError(errorMsg);
@@ -298,10 +313,18 @@ const App: React.FC = () => {
   };
 
   const loadHistoryItem = (item: HistoryItem) => {
-    setResult(item.result);
-    setFile(null); 
-    setAnalysisMode(item.mode);
-    setStatus(AnalysisStatus.COMPLETED);
+    if (item.type === 'COPY') {
+      setIsCopyAnalysisMode(true);
+      setCopyAnalysisResult(item.copyResult || null);
+      setCopyInput(item.fileName);
+      setStatus(AnalysisStatus.IDLE);
+    } else {
+      setIsCopyAnalysisMode(false);
+      setResult(item.result || null);
+      setFile(null); 
+      setAnalysisMode(item.mode || 'FAST');
+      setStatus(AnalysisStatus.COMPLETED);
+    }
     setShowHistory(false);
     setIsBackgroundMode(false);
   };
@@ -411,6 +434,123 @@ const App: React.FC = () => {
       setIsGeneratingViralCopies(false);
     }
   };
+
+  const handleAnalyzeCopy = async () => {
+    if (!copyInput.trim()) {
+      setNotification({ message: "请输入短视频文案", type: 'error' });
+      return;
+    }
+    
+    if (!apiKey) {
+      setNotification({ message: "API Key 未配置", type: 'error' });
+      return;
+    }
+
+    setIsAnalyzingCopy(true);
+    setCopyAnalysisResult(null);
+    setNotification({ message: "正在深度拆解文案并生成新脚本...", type: 'info' });
+
+    const controller = new AbortController();
+    copyAbortControllerRef.current = controller;
+
+    try {
+      const result = await analyzeAndGenerateCopy(copyInput, industryInput, needsInput, userBackgroundInput, apiKey, controller.signal);
+      setCopyAnalysisResult(result);
+      
+      // Add to history
+      const historyItem: HistoryItem = {
+        id: Date.now().toString(),
+        date: new Date().toLocaleString(),
+        fileName: copyInput.slice(0, 20) + (copyInput.length > 20 ? '...' : ''),
+        copyResult: result,
+        type: 'COPY'
+      };
+      const newHistory = [historyItem, ...history];
+      setHistory(newHistory);
+      localStorage.setItem('learnsnap_history_v1', JSON.stringify(newHistory));
+      
+      setNotification({ message: "分析与生成成功！", type: 'success' });
+    } catch (e: any) {
+      if (e.message === '取消操作') {
+        setNotification({ message: "分析已取消", type: 'info' });
+      } else {
+        console.error("Copy Analysis Error:", e);
+        setNotification({ message: `分析失败: ${e.message}`, type: 'error' });
+      }
+    } finally {
+      setIsAnalyzingCopy(false);
+      copyAbortControllerRef.current = null;
+    }
+  };
+
+  const handleRefineCopy = async () => {
+    if (!copyRefineInput.trim() || !copyAnalysisResult || isRefiningCopy) return;
+    
+    setIsRefiningCopy(true);
+    setNotification({ message: "正在根据要求优化文案...", type: 'info' });
+    
+    const controller = new AbortController();
+    copyAbortControllerRef.current = controller;
+
+    try {
+      const refined = await refineCopyAnalysis(copyAnalysisResult, copyRefineInput, userBackgroundInput, apiKey, controller.signal);
+      setCopyAnalysisResult({
+        ...copyAnalysisResult,
+        generatedScripts: refined.generatedScripts
+      });
+      setCopyRefineInput('');
+      setNotification({ message: "文案优化成功！", type: 'success' });
+    } catch (e: any) {
+      if (e.message !== '取消操作') {
+        setNotification({ message: `优化失败: ${e.message}`, type: 'error' });
+      }
+    } finally {
+      setIsRefiningCopy(false);
+      copyAbortControllerRef.current = null;
+    }
+  };
+
+  const handleGenerateMoreCopies = async () => {
+    if (!copyAnalysisResult || isRefiningCopy) return;
+    
+    setIsRefiningCopy(true);
+    setNotification({ message: "正在生成更多爆款文案...", type: 'info' });
+    
+    const controller = new AbortController();
+    copyAbortControllerRef.current = controller;
+
+    try {
+      const more = await refineCopyAnalysis(copyAnalysisResult, "请再生成 3 条不同风格的爆款短视频文案脚本", userBackgroundInput, apiKey, controller.signal);
+      setCopyAnalysisResult({
+        ...copyAnalysisResult,
+        generatedScripts: [...copyAnalysisResult.generatedScripts, ...more.generatedScripts]
+      });
+      setNotification({ message: "更多文案生成成功！", type: 'success' });
+    } catch (e: any) {
+      if (e.message !== '取消操作') {
+        setNotification({ message: `生成失败: ${e.message}`, type: 'error' });
+      }
+    } finally {
+      setIsRefiningCopy(false);
+      copyAbortControllerRef.current = null;
+    }
+  };
+
+  const handleClearCopy = () => {
+    setCopyInput('');
+    setIndustryInput('');
+    setNeedsInput('');
+    setUserBackgroundInput('');
+    setCopyAnalysisResult(null);
+    setNotification({ message: "内容已清空", type: 'info' });
+  };
+
+  const cancelCopyAnalysis = () => {
+    if (copyAbortControllerRef.current) {
+      copyAbortControllerRef.current.abort();
+    }
+  };
+
   const showLanding = status === AnalysisStatus.IDLE || isBackgroundMode;
 
   return (
@@ -448,8 +588,7 @@ const App: React.FC = () => {
                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                </button>
             </div>
-            
-            <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin">
+                        <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-thin">
                {history.length === 0 ? (
                  <div className="text-center text-slate-500 mt-10 text-sm">暂无历史记录</div>
                ) : (
@@ -457,8 +596,14 @@ const App: React.FC = () => {
                    <div key={item.id} onClick={() => loadHistoryItem(item)} className="p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-[#00D4FF]/30 cursor-pointer group transition-all">
                       <div className="flex justify-between items-start mb-1">
                         <span className="text-[10px] text-slate-500 font-mono">{item.date}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${item.mode === 'DEEP' ? 'border-purple-500/30 text-purple-400' : 'border-[#00D4FF]/30 text-[#00D4FF]'}`}>
-                          {item.mode === 'DEEP' ? '深度' : '极速'}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          item.type === 'COPY' 
+                            ? 'border-emerald-500/30 text-emerald-400' 
+                            : item.mode === 'DEEP' 
+                              ? 'border-purple-500/30 text-purple-400' 
+                              : 'border-[#00D4FF]/30 text-[#00D4FF]'
+                        }`}>
+                          {item.type === 'COPY' ? '文案' : item.mode === 'DEEP' ? '深度' : '极速'}
                         </span>
                       </div>
                       <div className="text-sm text-slate-200 font-medium truncate group-hover:text-white">{item.fileName}</div>
@@ -515,7 +660,7 @@ const App: React.FC = () => {
       <main className="flex-grow flex flex-col relative z-10 min-h-[calc(100vh-160px)]">
         
         {/* === LANDING PAGE (Shown when IDLE or BACKGROUNDED) === */}
-        {showLanding && (
+        {showLanding && !isCopyAnalysisMode && (
           <div className="flex-grow flex flex-col justify-center max-w-7xl mx-auto w-full px-6 py-12">
             
             {/* Hero Section */}
@@ -629,6 +774,23 @@ const App: React.FC = () => {
                    </button>
                  </div>
                )}
+
+               {!file && !isBackgroundMode && (
+                 <div className="flex justify-center mb-8 animate-fade-in-up delay-100">
+                    <button 
+                      onClick={() => setIsCopyAnalysisMode(true)}
+                      className="group flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-[#8B5CF6]/20 to-[#00D4FF]/20 hover:from-[#8B5CF6]/30 hover:to-[#00D4FF]/30 border border-white/10 hover:border-[#00D4FF]/50 rounded-2xl transition-all duration-300 shadow-lg hover:shadow-[#00D4FF]/10"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[#00D4FF] group-hover:scale-110 transition-transform">
+                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                      </div>
+                      <div className="text-left">
+                        <div className="text-white font-bold text-lg">短视频文案分析</div>
+                        <div className="text-slate-400 text-xs">粘贴文案，深度拆解并生成爆款脚本</div>
+                      </div>
+                    </button>
+                 </div>
+               )}
             </div>
 
             {/* Feature Cards */}
@@ -650,6 +812,244 @@ const App: React.FC = () => {
                />
             </div>
 
+          </div>
+        )}
+
+        {/* === COPY ANALYSIS MODE === */}
+        {isCopyAnalysisMode && (
+          <div className="max-w-4xl mx-auto px-6 py-8 w-full animate-fade-in">
+            <div className="flex items-center justify-between mb-8">
+              <button 
+                onClick={() => {
+                  setIsCopyAnalysisMode(false);
+                  setCopyAnalysisResult(null);
+                }} 
+                className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+                返回首页
+              </button>
+              <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#00D4FF]/20 flex items-center justify-center text-[#00D4FF]">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                </div>
+                短视频文案深度分析
+              </h2>
+            </div>
+
+            {!copyAnalysisResult ? (
+              <div className="glass-panel p-8 rounded-3xl border border-white/10 space-y-6">
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-sm font-medium text-slate-300">粘贴原始短视频文案</label>
+                  <button 
+                    onClick={handleClearCopy}
+                    className="text-xs text-slate-500 hover:text-red-400 transition-colors flex items-center gap-1"
+                  >
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    一键清空
+                  </button>
+                </div>
+                <textarea 
+                  value={copyInput}
+                  onChange={(e) => setCopyInput(e.target.value)}
+                  placeholder="在这里粘贴你想要分析的短视频文案或脚本内容..."
+                  className="w-full h-48 bg-black/30 border border-white/10 rounded-xl p-4 text-white text-sm focus:border-[#00D4FF] focus:ring-1 focus:ring-[#00D4FF] outline-none transition-all resize-none"
+                />
+
+                <div className="space-y-4">
+                  <label className="block text-sm font-medium text-slate-300">个人/业务背景介绍</label>
+                  <textarea 
+                    value={userBackgroundInput}
+                    onChange={(e) => setUserBackgroundInput(e.target.value)}
+                    placeholder="介绍一下你是做什么的，你的产品或服务是什么，这样 AI 能生成更精准的内容..."
+                    className="w-full h-24 bg-black/30 border border-white/10 rounded-xl p-4 text-white text-sm focus:border-[#00D4FF] outline-none transition-all resize-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">你的行业 (可选)</label>
+                    <input 
+                      type="text"
+                      value={industryInput}
+                      onChange={(e) => setIndustryInput(e.target.value)}
+                      placeholder="例如：美妆、知识付费、餐饮..."
+                      className="w-full bg-black/30 border border-white/10 rounded-xl p-4 text-white text-sm focus:border-[#00D4FF] outline-none transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-2">你的具体需求 (可选)</label>
+                    <input 
+                      type="text"
+                      value={needsInput}
+                      onChange={(e) => setNeedsInput(e.target.value)}
+                      placeholder="例如：增加互动、直接转化、品牌宣传..."
+                      className="w-full bg-black/30 border border-white/10 rounded-xl p-4 text-white text-sm focus:border-[#00D4FF] outline-none transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-4">
+                  {isAnalyzingCopy ? (
+                    <button 
+                      onClick={cancelCopyAnalysis}
+                      className="flex-1 py-4 bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 hover:bg-red-500/30 transition-all flex items-center justify-center gap-2"
+                    >
+                      取消分析
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={handleAnalyzeCopy}
+                      disabled={!copyInput.trim()}
+                      className="flex-1 py-4 bg-gradient-to-r from-[#00D4FF] to-[#8B5CF6] text-black font-bold rounded-xl hover:shadow-[0_0_30px_rgba(0,212,255,0.3)] transition-all disabled:opacity-50 disabled:shadow-none flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                      一键深度拆解并生成新脚本
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-8 animate-fade-in">
+                {/* Analysis Result */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <GlassCard title="文案底层逻辑拆解">
+                    <div className="space-y-4">
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                        <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【钩子】 Hook</h4>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.hook}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                        <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【反差】 Contrast</h4>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.contrast}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                        <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【价值】 Value</h4>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.value}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                        <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【信任】 Trust</h4>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.trust}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                        <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【网兜】 CTA</h4>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.cta}</p>
+                      </div>
+                    </div>
+                  </GlassCard>
+
+                  <div className="space-y-6">
+                    <GlassCard title="受众与卖点">
+                      <div className="space-y-4">
+                        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                          <h4 className="text-xs font-bold text-[#8B5CF6] uppercase mb-2">受众画像</h4>
+                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.targetAudience}</p>
+                        </div>
+                        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                          <h4 className="text-xs font-bold text-[#8B5CF6] uppercase mb-2">核心卖点</h4>
+                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.sellingPoints}</p>
+                        </div>
+                      </div>
+                    </GlassCard>
+
+                    <div className="p-6 rounded-2xl bg-gradient-to-br from-[#00D4FF]/20 to-[#8B5CF6]/20 border border-[#00D4FF]/30">
+                      <h3 className="text-white font-bold mb-2">分析总结</h3>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        该文案成功捕捉了用户的痛点，通过清晰的逻辑结构引导用户产生共鸣。建议在生成新文案时，保留其节奏感，并针对您的行业特性进行微调。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Generated Scripts */}
+                <div className="space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                      <span className="w-1 h-6 bg-[#8B5CF6] rounded-full"></span>
+                      定制化爆款脚本生成
+                    </h3>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={handleAnalyzeCopy}
+                        disabled={isRefiningCopy}
+                        className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs text-slate-300 transition-all flex items-center gap-2"
+                      >
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        重新生成
+                      </button>
+                      <button 
+                        onClick={handleGenerateMoreCopies}
+                        disabled={isRefiningCopy}
+                        className="px-4 py-2 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 border border-[#8B5CF6]/30 rounded-lg text-xs text-[#8B5CF6] transition-all flex items-center gap-2"
+                      >
+                        {isRefiningCopy ? (
+                          <div className="w-3 h-3 border border-[#8B5CF6]/30 border-t-[#8B5CF6] rounded-full animate-spin"></div>
+                        ) : (
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+                        )}
+                        生成更多 (3套)
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-6">
+                    {copyAnalysisResult.generatedScripts.map((script, i) => (
+                      <div key={i} className="glass-panel p-6 rounded-2xl border border-white/10 hover:border-[#00D4FF]/30 transition-all group relative">
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="text-lg font-bold text-white group-hover:text-[#00D4FF] transition-colors">{script.title}</h4>
+                          <button 
+                            onClick={() => {
+                              navigator.clipboard.writeText(script.content);
+                              setNotification({ message: "脚本内容已复制", type: 'success' });
+                            }}
+                            className="p-2 bg-white/5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-all"
+                            title="复制脚本"
+                          >
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                          </button>
+                        </div>
+                        <div className="p-4 bg-black/30 rounded-xl text-slate-300 text-sm leading-relaxed whitespace-pre-wrap border border-white/5">
+                          {script.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Refine Chat Window */}
+                  <div className="mt-10 glass-panel p-6 rounded-2xl border border-[#00D4FF]/20 bg-[#00D4FF]/5">
+                    <h4 className="text-white font-bold mb-4 flex items-center gap-2">
+                      <svg className="w-5 h-5 text-[#00D4FF]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                      继续优化文案
+                    </h4>
+                    <div className="flex gap-3">
+                      <input 
+                        type="text"
+                        value={copyRefineInput}
+                        onChange={(e) => setCopyRefineInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleRefineCopy()}
+                        placeholder="例如：开头再劲爆一点、增加一些幽默感、针对宝妈群体优化..."
+                        className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white text-sm focus:border-[#00D4FF] outline-none transition-all"
+                      />
+                      <button 
+                        onClick={handleRefineCopy}
+                        disabled={isRefiningCopy || !copyRefineInput.trim()}
+                        className="px-6 py-3 bg-[#00D4FF] text-black font-bold rounded-xl hover:shadow-[0_0_20px_rgba(0,212,255,0.3)] transition-all disabled:opacity-50"
+                      >
+                        {isRefiningCopy ? '优化中...' : '发送'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-center pt-4">
+                  <button 
+                    onClick={() => setCopyAnalysisResult(null)}
+                    className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-slate-300 transition-all"
+                  >
+                    重新分析新文案
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

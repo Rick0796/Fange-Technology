@@ -573,3 +573,171 @@ export const chatWithContext = async (
     return `Error: ${e?.message || e || "未知错误"}`;
   }
 };
+
+export const analyzeAndGenerateCopy = async (
+  originalCopy: string,
+  industry: string,
+  needs: string,
+  userBackground: string,
+  apiKey: string,
+  signal?: AbortSignal
+) => {
+  const ai = new GoogleGenAI({ apiKey });
+  try {
+    const prompt = `
+      你现在是一名顶级的短视频文案专家和营销策划专家，深谙中国短视频市场（抖音、视频号、小红书）的爆款逻辑。
+      
+      ### 用户背景信息
+      - 个人/业务介绍：${userBackground || '未提供'}
+      - 所属行业：${industry || '通用'}
+      - 核心需求：${needs || '提升转化与互动'}
+      
+      ### 任务 1：深度拆解分析
+      请对以下原始短视频文案进行深度拆解分析：
+      "${originalCopy}"
+      
+      请根据文案内容，动态识别并提取其结构化逻辑。分析维度必须包含（但不限于）：
+      1. 钩子（Hook）：它是如何在前3秒吸引注意力的？
+      2. 认知反差（Contrast）：它如何打破固有认知或制造冲突？
+      3. 价值交付（Value）：它提供了什么具体的干货、利益或情绪价值？
+      4. 信任背书（Trust）：它如何建立权威感或展示证据？
+      5. 闭环网兜（CTA）：它如何引导用户进行下一步行动？
+      6. 受众画像：这段文案针对的是哪类人群？
+      7. 核心卖点：它传递的最核心价值是什么？
+      
+      ### 任务 2：定制化爆款文案生成
+      基于上述分析的底层逻辑，结合用户的背景和需求，生成 3 条全新的爆款短视频文案。
+      
+      要求：
+      1. 保持与原案一致的成功逻辑（如节奏感、钩子类型），但内容必须完全适配用户的业务背景。
+      2. 语言必须利落、口语化、有号召力，严禁出现AI感重的废话。
+      3. 结构清晰，标注出【钩子】、【反差】、【价值】等关键节点。
+      4. 简体中文。
+      
+      返回严格 JSON 格式：
+      {
+        "analysis": {
+          "hook": "...",
+          "contrast": "...",
+          "value": "...",
+          "trust": "...",
+          "cta": "...",
+          "targetAudience": "...",
+          "sellingPoints": "..."
+        },
+        "generatedScripts": [
+          { "title": "文案 1：[风格描述]", "content": "..." },
+          { "title": "文案 2：[风格描述]", "content": "..." },
+          { "title": "文案 3：[风格描述]", "content": "..." }
+        ]
+      }
+    `;
+
+    const response = await cancellable(ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: { parts: [{ text: prompt }] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            analysis: {
+              type: Type.OBJECT,
+              properties: {
+                hook: { type: Type.STRING },
+                contrast: { type: Type.STRING },
+                value: { type: Type.STRING },
+                trust: { type: Type.STRING },
+                cta: { type: Type.STRING },
+                targetAudience: { type: Type.STRING },
+                sellingPoints: { type: Type.STRING }
+              }
+            },
+            generatedScripts: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  content: { type: Type.STRING }
+                }
+              }
+            }
+          }
+        }
+      }
+    }), signal);
+
+    const text = response.text;
+    if (!text) throw new Error("No response");
+    return JSON.parse(text);
+  } catch (e: any) {
+    console.error("Copy Analysis Error:", e);
+    throw new Error(`文案分析失败: ${e.message}`);
+  }
+};
+
+export const refineCopyAnalysis = async (
+  currentResult: any,
+  userInstruction: string,
+  userBackground: string,
+  apiKey: string,
+  signal?: AbortSignal
+) => {
+  const ai = new GoogleGenAI({ apiKey });
+  try {
+    const prompt = `
+      你现在是一名顶级的短视频文案专家。用户对之前的文案分析和生成结果提出了修改要求。
+      
+      ### 用户背景
+      ${userBackground}
+      
+      ### 当前结果
+      ${JSON.stringify(currentResult)}
+      
+      ### 用户修改要求
+      "${userInstruction}"
+      
+      请根据要求，重新生成 3 条优化后的短视频文案脚本。你可以保持分析逻辑不变，仅修改脚本内容。
+      
+      返回严格 JSON 格式：
+      {
+        "generatedScripts": [
+          { "title": "优化文案 1", "content": "..." },
+          { "title": "优化文案 2", "content": "..." },
+          { "title": "优化文案 3", "content": "..." }
+        ]
+      }
+    `;
+
+    const response = await cancellable(ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: { parts: [{ text: prompt }] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            generatedScripts: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  content: { type: Type.STRING }
+                }
+              }
+            }
+          }
+        }
+      }
+    }), signal);
+
+    const text = response.text;
+    if (!text) throw new Error("No response");
+    return JSON.parse(text);
+  } catch (e: any) {
+    console.error("Copy Refinement Error:", e);
+    throw new Error(`文案修改失败: ${e.message}`);
+  }
+};
