@@ -113,6 +113,7 @@ const App: React.FC = () => {
 
   // History & Mode State
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [fileUriCache, setFileUriCache] = useState<Record<string, string>>({});
   const [showHistory, setShowHistory] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('FAST');
 
@@ -224,6 +225,17 @@ const App: React.FC = () => {
     }
   };
 
+  const handleJumpToCopyAnalysis = (script: string) => {
+    if (!script || script.includes("未提取") || script.includes("脚本提取中")) {
+      setNotification({ message: "暂无有效脚本可用于分析", type: 'error' });
+      return;
+    }
+    setCopyInput(script);
+    setIsCopyAnalysisMode(true);
+    setNotification({ message: "已将脚本导入文案分析模式", type: 'success' });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const startAnalysis = async (mode: AnalysisMode) => {
     if (!file) {
       setNotification({ message: "请先上传视频文件", type: 'error' });
@@ -247,8 +259,22 @@ const App: React.FC = () => {
     // Setup AbortController
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    
+    // Add a global timeout for the entire analysis process (10 minutes for deep analysis)
+    const timeoutId = setTimeout(() => {
+      if (abortControllerRef.current === controller) {
+        controller.abort();
+        setError("分析超时，视频处理或生成时间过长。请尝试使用快速模式。");
+        setStatus(AnalysisStatus.ERROR);
+        setNotification({ message: "分析超时，请重试", type: 'error' });
+      }
+    }, mode === 'DEEP' ? 600000 : 300000);
 
     try {
+      // Check cache first
+      const cacheKey = `${file.name}-${file.size}`;
+      let cachedUri = fileUriCache[cacheKey];
+      
       const data = await analyzeVideoContent(
         file, 
         apiKey, 
@@ -262,8 +288,15 @@ const App: React.FC = () => {
              setProgress(percent);
           }
         },
-        controller.signal
+        controller.signal,
+        cachedUri
       );
+      
+      if (data.fileUri) {
+        setFileUriCache(prev => ({ ...prev, [cacheKey]: data.fileUri! }));
+      }
+      
+      clearTimeout(timeoutId);
       
       setResult(data);
       setProgress(100);
@@ -313,14 +346,21 @@ const App: React.FC = () => {
   };
 
   const loadHistoryItem = (item: HistoryItem) => {
+    if (!item) return;
+    
     if (item.type === 'COPY') {
       setIsCopyAnalysisMode(true);
       setCopyAnalysisResult(item.copyResult || null);
-      setCopyInput(item.fileName);
+      // Use originalCopy if available, otherwise fallback to fileName
+      setCopyInput(item.copyResult?.originalCopy || item.fileName || '');
       setStatus(AnalysisStatus.IDLE);
     } else {
+      if (!item.result) {
+        setNotification({ message: "该记录数据不完整", type: 'error' });
+        return;
+      }
       setIsCopyAnalysisMode(false);
-      setResult(item.result || null);
+      setResult(item.result);
       setFile(null); 
       setAnalysisMode(item.mode || 'FAST');
       setStatus(AnalysisStatus.COMPLETED);
@@ -329,8 +369,21 @@ const App: React.FC = () => {
     setIsBackgroundMode(false);
   };
 
+  const deleteHistoryItem = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    console.log("Deleting history item:", id);
+    if (window.confirm("确定要删除这条记录吗？")) {
+      setHistory(prev => {
+        const updated = prev.filter(item => item.id !== id);
+        localStorage.setItem('learnsnap_history_v1', JSON.stringify(updated));
+        return updated;
+      });
+      setNotification({ message: "记录已删除", type: 'success' });
+    }
+  };
+
   const clearHistory = () => {
-    if(confirm("确定要清空所有历史记录吗？")) {
+    if (window.confirm("确定要清空所有历史记录吗？")) {
       setHistory([]);
       localStorage.removeItem('learnsnap_history_v1');
     }
@@ -340,11 +393,15 @@ const App: React.FC = () => {
     setStatus(AnalysisStatus.IDLE);
     setFile(null);
     setResult(null);
+    setCopyAnalysisResult(null);
     setProgress(0);
     setIsBackgroundMode(false);
     setSoraPrompts([]);
     setViralCopies([]);
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    if (copyAbortControllerRef.current) copyAbortControllerRef.current.abort();
     abortControllerRef.current = null;
+    copyAbortControllerRef.current = null;
   };
 
   const handleSoraUpdate = (data: any) => {
@@ -447,22 +504,47 @@ const App: React.FC = () => {
     }
 
     setIsAnalyzingCopy(true);
-    setCopyAnalysisResult(null);
+    // If we already have a result, don't clear it immediately to allow for a loading overlay on the results view
+    if (!copyAnalysisResult) {
+      setCopyAnalysisResult(null);
+    }
     setNotification({ message: "正在深度拆解文案并生成新脚本...", type: 'info' });
 
+    // Abort any existing analysis before starting a new one
+    if (copyAbortControllerRef.current) {
+      copyAbortControllerRef.current.abort();
+    }
     const controller = new AbortController();
     copyAbortControllerRef.current = controller;
+    
+    // Add a timeout for copy analysis (120 seconds)
+    const timeoutId = setTimeout(() => {
+      if (copyAbortControllerRef.current === controller) {
+        controller.abort();
+        setNotification({ message: "文案分析超时，请重试", type: 'error' });
+        setIsAnalyzingCopy(false);
+      }
+    }, 120000);
 
     try {
+      console.log("[CopyAnalysis] Starting analysis for input length:", copyInput.length);
       const result = await analyzeAndGenerateCopy(copyInput, industryInput, needsInput, userBackgroundInput, apiKey, controller.signal);
-      setCopyAnalysisResult(result);
+      console.log("[CopyAnalysis] Analysis successful, result:", result);
+      
+      // Ensure originalCopy is preserved
+      const finalResult = {
+        ...result,
+        originalCopy: result.originalCopy || copyInput
+      };
+      
+      setCopyAnalysisResult(finalResult);
       
       // Add to history
       const historyItem: HistoryItem = {
         id: Date.now().toString(),
         date: new Date().toLocaleString(),
         fileName: copyInput.slice(0, 20) + (copyInput.length > 20 ? '...' : ''),
-        copyResult: result,
+        copyResult: finalResult,
         type: 'COPY'
       };
       const newHistory = [historyItem, ...history];
@@ -471,13 +553,14 @@ const App: React.FC = () => {
       
       setNotification({ message: "分析与生成成功！", type: 'success' });
     } catch (e: any) {
+      console.error("[CopyAnalysis] Error caught in handleAnalyzeCopy:", e);
       if (e.message === '取消操作') {
         setNotification({ message: "分析已取消", type: 'info' });
       } else {
-        console.error("Copy Analysis Error:", e);
         setNotification({ message: `分析失败: ${e.message}`, type: 'error' });
       }
     } finally {
+      clearTimeout(timeoutId);
       setIsAnalyzingCopy(false);
       copyAbortControllerRef.current = null;
     }
@@ -592,23 +675,35 @@ const App: React.FC = () => {
                {history.length === 0 ? (
                  <div className="text-center text-slate-500 mt-10 text-sm">暂无历史记录</div>
                ) : (
-                 history.map(item => (
-                   <div key={item.id} onClick={() => loadHistoryItem(item)} className="p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-[#00D4FF]/30 cursor-pointer group transition-all">
-                      <div className="flex justify-between items-start mb-1">
-                        <span className="text-[10px] text-slate-500 font-mono">{item.date}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                          item.type === 'COPY' 
-                            ? 'border-emerald-500/30 text-emerald-400' 
-                            : item.mode === 'DEEP' 
-                              ? 'border-purple-500/30 text-purple-400' 
-                              : 'border-[#00D4FF]/30 text-[#00D4FF]'
-                        }`}>
-                          {item.type === 'COPY' ? '文案' : item.mode === 'DEEP' ? '深度' : '极速'}
-                        </span>
-                      </div>
-                      <div className="text-sm text-slate-200 font-medium truncate group-hover:text-white">{item.fileName}</div>
-                   </div>
-                 ))
+                 history?.map(item => (
+                  <div key={item.id} onClick={() => loadHistoryItem(item)} className="p-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 hover:border-[#00D4FF]/30 cursor-pointer group transition-all relative">
+                     <div className="flex justify-between items-start mb-1">
+                       <span className="text-[10px] text-slate-500 font-mono">{item.date}</span>
+                       <div className="flex items-center gap-2">
+                         <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                           item.type === 'COPY' 
+                             ? 'border-emerald-500/30 text-emerald-400' 
+                             : item.mode === 'DEEP' 
+                               ? 'border-purple-500/30 text-purple-400' 
+                               : 'border-[#00D4FF]/30 text-[#00D4FF]'
+                         }`}>
+                           {item.type === 'COPY' ? '文案' : item.mode === 'DEEP' ? '深度' : '极速'}
+                         </span>
+                         <button 
+                           onClick={(e) => {
+                             console.log("Delete button clicked for ID:", item.id);
+                             deleteHistoryItem(e, item.id);
+                           }}
+                           className="text-slate-500 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
+                           title="删除记录"
+                         >
+                           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                         </button>
+                       </div>
+                     </div>
+                     <div className="text-sm text-slate-200 font-medium truncate group-hover:text-white pr-6">{item.fileName}</div>
+                  </div>
+                ))
                )}
             </div>
 
@@ -746,7 +841,8 @@ const App: React.FC = () => {
                    {/* Fast Mode Button */}
                    <button 
                      onClick={() => startAnalysis('FAST')}
-                     className="relative overflow-hidden group p-6 rounded-2xl border border-[#00D4FF]/30 bg-[#00D4FF]/5 hover:bg-[#00D4FF]/10 hover:border-[#00D4FF] transition-all text-left"
+                     disabled={status !== AnalysisStatus.IDLE && status !== AnalysisStatus.ERROR}
+                     className={`relative overflow-hidden group p-6 rounded-2xl border border-[#00D4FF]/30 bg-[#00D4FF]/5 hover:bg-[#00D4FF]/10 hover:border-[#00D4FF] transition-all text-left ${status !== AnalysisStatus.IDLE && status !== AnalysisStatus.ERROR ? 'opacity-50 cursor-not-allowed' : ''}`}
                    >
                      <div className="absolute inset-0 bg-gradient-to-r from-[#00D4FF]/0 to-[#00D4FF]/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                      <div className="flex items-center gap-4 mb-2">
@@ -761,7 +857,8 @@ const App: React.FC = () => {
                    {/* Deep Mode Button */}
                    <button 
                      onClick={() => startAnalysis('DEEP')}
-                     className="relative overflow-hidden group p-6 rounded-2xl border border-[#8B5CF6]/30 bg-[#8B5CF6]/5 hover:bg-[#8B5CF6]/10 hover:border-[#8B5CF6] transition-all text-left"
+                     disabled={status !== AnalysisStatus.IDLE && status !== AnalysisStatus.ERROR}
+                     className={`relative overflow-hidden group p-6 rounded-2xl border border-[#8B5CF6]/30 bg-[#8B5CF6]/5 hover:bg-[#8B5CF6]/10 hover:border-[#8B5CF6] transition-all text-left ${status !== AnalysisStatus.IDLE && status !== AnalysisStatus.ERROR ? 'opacity-50 cursor-not-allowed' : ''}`}
                    >
                      <div className="absolute inset-0 bg-gradient-to-r from-[#8B5CF6]/0 to-[#8B5CF6]/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                      <div className="flex items-center gap-4 mb-2">
@@ -910,30 +1007,45 @@ const App: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div className="space-y-8 animate-fade-in">
+              <div className="space-y-8 animate-fade-in relative">
+                {isAnalyzingCopy && (
+                   <div className="absolute inset-x-0 -inset-y-4 z-50 bg-black/60 backdrop-blur-sm rounded-3xl flex flex-col items-center justify-center gap-4">
+                     <div className="w-12 h-12 border-4 border-[#00D4FF]/30 border-t-[#00D4FF] rounded-full animate-spin"></div>
+                     <p className="text-[#00D4FF] font-bold">正在重新分析并生成脚本...</p>
+                     <button onClick={cancelCopyAnalysis} className="px-6 py-2 bg-red-500/20 text-red-400 rounded-lg border border-red-500/30 hover:bg-red-500/30 transition-all font-bold">取消分析</button>
+                   </div>
+                )}
                 {/* Analysis Result */}
+                <div className="space-y-6 mb-8">
+                  <GlassCard title="原始文案内容">
+                    <div className="p-4 bg-black/30 rounded-xl border border-white/5 text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+                      {copyAnalysisResult.originalCopy || copyInput}
+                    </div>
+                  </GlassCard>
+                </div>
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <GlassCard title="文案底层逻辑拆解">
                     <div className="space-y-4">
                       <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                         <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【钩子】 Hook</h4>
-                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.hook}</p>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.hook || "未提取"}</p>
                       </div>
                       <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                         <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【反差】 Contrast</h4>
-                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.contrast}</p>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.contrast || "未提取"}</p>
                       </div>
                       <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                         <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【价值】 Value</h4>
-                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.value}</p>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.value || "未提取"}</p>
                       </div>
                       <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                         <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【信任】 Trust</h4>
-                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.trust}</p>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.trust || "未提取"}</p>
                       </div>
                       <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                         <h4 className="text-xs font-bold text-[#00D4FF] uppercase mb-2">【网兜】 CTA</h4>
-                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.cta}</p>
+                        <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.cta || "未提取"}</p>
                       </div>
                     </div>
                   </GlassCard>
@@ -943,11 +1055,11 @@ const App: React.FC = () => {
                       <div className="space-y-4">
                         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                           <h4 className="text-xs font-bold text-[#8B5CF6] uppercase mb-2">受众画像</h4>
-                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.targetAudience}</p>
+                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.targetAudience || "未提取"}</p>
                         </div>
                         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
                           <h4 className="text-xs font-bold text-[#8B5CF6] uppercase mb-2">核心卖点</h4>
-                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis.sellingPoints}</p>
+                          <p className="text-sm text-slate-300 leading-relaxed">{copyAnalysisResult.analysis?.sellingPoints || "未提取"}</p>
                         </div>
                       </div>
                     </GlassCard>
@@ -971,18 +1083,18 @@ const App: React.FC = () => {
                     <div className="flex gap-2">
                       <button 
                         onClick={handleAnalyzeCopy}
-                        disabled={isRefiningCopy}
-                        className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs text-slate-300 transition-all flex items-center gap-2"
+                        disabled={isAnalyzingCopy || isRefiningCopy}
+                        className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs text-slate-300 transition-all flex items-center gap-2 disabled:opacity-50"
                       >
                         <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                         重新生成
                       </button>
                       <button 
                         onClick={handleGenerateMoreCopies}
-                        disabled={isRefiningCopy}
-                        className="px-4 py-2 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 border border-[#8B5CF6]/30 rounded-lg text-xs text-[#8B5CF6] transition-all flex items-center gap-2"
+                        disabled={isAnalyzingCopy || isRefiningCopy}
+                        className="px-4 py-2 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 border border-[#8B5CF6]/30 rounded-lg text-xs text-[#8B5CF6] transition-all flex items-center gap-2 disabled:opacity-50"
                       >
-                        {isRefiningCopy ? (
+                        {isAnalyzingCopy || isRefiningCopy ? (
                           <div className="w-3 h-3 border border-[#8B5CF6]/30 border-t-[#8B5CF6] rounded-full animate-spin"></div>
                         ) : (
                           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
@@ -992,26 +1104,32 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="grid grid-cols-1 gap-6">
-                    {copyAnalysisResult.generatedScripts.map((script, i) => (
-                      <div key={i} className="glass-panel p-6 rounded-2xl border border-white/10 hover:border-[#00D4FF]/30 transition-all group relative">
-                        <div className="flex items-center justify-between mb-4">
-                          <h4 className="text-lg font-bold text-white group-hover:text-[#00D4FF] transition-colors">{script.title}</h4>
-                          <button 
-                            onClick={() => {
-                              navigator.clipboard.writeText(script.content);
-                              setNotification({ message: "脚本内容已复制", type: 'success' });
-                            }}
-                            className="p-2 bg-white/5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-all"
-                            title="复制脚本"
-                          >
-                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
-                          </button>
-                        </div>
-                        <div className="p-4 bg-black/30 rounded-xl text-slate-300 text-sm leading-relaxed whitespace-pre-wrap border border-white/5">
-                          {script.content}
-                        </div>
+                    {!copyAnalysisResult?.generatedScripts || copyAnalysisResult.generatedScripts.length === 0 ? (
+                      <div className="p-10 text-center bg-white/5 rounded-2xl border border-dashed border-white/10 text-slate-500">
+                        暂无生成的脚本内容，请尝试重新生成
                       </div>
-                    ))}
+                    ) : (
+                      copyAnalysisResult.generatedScripts.map((script, i) => (
+                        <div key={i} className="glass-panel p-6 rounded-2xl border border-white/10 hover:border-[#00D4FF]/30 transition-all group relative">
+                          <div className="flex items-center justify-between mb-4">
+                            <h4 className="text-lg font-bold text-white group-hover:text-[#00D4FF] transition-colors">{script.title}</h4>
+                            <button 
+                              onClick={() => {
+                                navigator.clipboard.writeText(script.content);
+                                setNotification({ message: "脚本内容已复制", type: 'success' });
+                              }}
+                              className="p-2 bg-white/5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-all"
+                              title="复制脚本"
+                            >
+                              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                            </button>
+                          </div>
+                          <div className="p-4 bg-black/30 rounded-xl text-slate-300 text-sm leading-relaxed whitespace-pre-wrap border border-white/5">
+                            {script.content}
+                          </div>
+                        </div>
+                      ))
+                    )}
                   </div>
 
                   {/* Refine Chat Window */}
@@ -1042,7 +1160,10 @@ const App: React.FC = () => {
 
                 <div className="flex justify-center pt-4">
                   <button 
-                    onClick={() => setCopyAnalysisResult(null)}
+                    onClick={() => {
+                      if (isAnalyzingCopy) cancelCopyAnalysis();
+                      setCopyAnalysisResult(null);
+                    }}
                     className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-slate-300 transition-all"
                   >
                     重新分析新文案
@@ -1109,7 +1230,7 @@ const App: React.FC = () => {
                    {analysisMode === 'DEEP' && result.timestamps && result.timestamps.length > 0 && (
                      <GlassCard title="时间轴节点">
                         <div className="flex flex-wrap gap-2">
-                           {result.timestamps.map((ts, i) => (
+                           {result?.timestamps?.map((ts, i) => (
                              <button 
                                key={i} 
                                onClick={() => setSeekTo(ts.seconds)}
@@ -1138,49 +1259,49 @@ const App: React.FC = () => {
                           <div className="space-y-4">
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">1. 核心命题</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.coreProposition}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.coreProposition || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">2. 开头类型</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.openingType}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.openingType || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">3. 核心冲突</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.conflictStructure}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.conflictStructure || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">4. 推进结构</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.progressionLogic}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.progressionLogic || "未提取"}</p>
                              </div>
                           </div>
                           <div className="space-y-4">
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">5. 中段钩子</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.psychologicalHook}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.psychologicalHook || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">6. 高潮金句</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.climaxSentence}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.climaxSentence || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">7. 语言风格DNA</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.languageFeatures}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.languageFeatures || "未提取"}</p>
                              </div>
                              <div className="p-3 bg-white/5 rounded border border-white/10">
                                 <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">8. 情绪曲线</h4>
-                                <p className="text-xs text-slate-300">{result.videoStructure.emotionalCurve}</p>
+                                <p className="text-xs text-slate-300">{result.videoStructure?.emotionalCurve || "未提取"}</p>
                              </div>
                           </div>
                        </div>
                        <div className="mt-4 p-3 bg-[#00D4FF]/5 rounded border border-[#00D4FF]/20">
                           <h4 className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider mb-1">观看回报</h4>
-                          <p className="text-xs text-slate-300 italic">{result.videoStructure.viewerReward}</p>
+                          <p className="text-xs text-slate-300 italic">{result.videoStructure?.viewerReward || "未提取"}</p>
                        </div>
                     </GlassCard>
 
                    <GlassCard title="视觉特征拆解 (点击查看详情)">
                       <div className="space-y-3">
-                         {result.visualFeatures.map((item, i) => (
+                         {result?.visualFeatures?.map((item, i) => (
                            <div 
                              key={i} 
                              onClick={() => setSelectedVisualFeature(item)}
@@ -1210,19 +1331,29 @@ const App: React.FC = () => {
                         <div>
                           <div className="flex items-center justify-between mb-1">
                             <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">视频原始脚本</h4>
-                            <button 
-                              onClick={() => {
-                                navigator.clipboard.writeText(result.viralContent.script);
-                                setNotification({ message: "脚本已复制", type: 'success' });
-                              }}
-                              className="p-1 hover:text-[#00D4FF] transition-colors"
-                              title="复制脚本"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={() => handleJumpToCopyAnalysis(result.viralContent?.script || "")}
+                                className="px-2 py-0.5 bg-[#00D4FF]/10 hover:bg-[#00D4FF]/20 text-[#00D4FF] border border-[#00D4FF]/30 rounded text-[10px] transition-all flex items-center gap-1"
+                                title="跳转到文案分析"
+                              >
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                                文案生成
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  navigator.clipboard.writeText(result.viralContent?.script || "");
+                                  setNotification({ message: "脚本已复制", type: 'success' });
+                                }}
+                                className="p-1 hover:text-[#00D4FF] transition-colors"
+                                title="复制脚本"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
+                              </button>
+                            </div>
                           </div>
                           <div className="p-3 bg-black/30 rounded border border-white/5 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
-                            {result.viralContent.script}
+                            {result.viralContent?.script || "未提取脚本"}
                           </div>
                         </div>
 
@@ -1231,7 +1362,7 @@ const App: React.FC = () => {
                             <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider">爆款文案生成</h4>
                             <button 
                               onClick={handleViralCopiesGenerate}
-                              disabled={isGeneratingViralCopies || !result.viralContent.script}
+                              disabled={isGeneratingViralCopies || !result.viralContent?.script}
                               className="px-3 py-1 bg-[#8B5CF6]/20 hover:bg-[#8B5CF6]/30 text-[#8B5CF6] border border-[#8B5CF6]/30 rounded text-[10px] transition-all flex items-center gap-1 disabled:opacity-50"
                             >
                               {isGeneratingViralCopies ? '生成中...' : (viralCopies.length > 0 ? '重新生成文案' : '一键生成爆款文案')}
@@ -1241,7 +1372,7 @@ const App: React.FC = () => {
                           {viralCopies.length > 0 && (
                             <div className="space-y-4">
                               <div className="space-y-2">
-                                {viralCopies.map((copy, i) => (
+                                {viralCopies?.map((copy, i) => (
                                   <div key={i} className="p-3 bg-white/5 rounded border border-white/10 text-xs text-slate-300 relative group/copy">
                                      <button 
                                        onClick={() => {
@@ -1259,7 +1390,7 @@ const App: React.FC = () => {
                               
                               <ChatInterface 
                                 apiKey={apiKey} 
-                                context={`基于原始脚本：${result.viralContent.script}\n已生成的爆款文案：\n${viralCopies.join('\n---\n')}`}
+                                context={`基于原始脚本：${result.viralContent?.script || ""}\n已生成的爆款文案：\n${viralCopies.join('\n---\n')}`}
                                 title="文案 AI 助手"
                                 height="300px"
                                 placeholder="要求修改文案或增加数量..."
@@ -1307,7 +1438,7 @@ const App: React.FC = () => {
                           {soraPrompts.length > 0 && (
                             <div className="space-y-4">
                               <div className="space-y-3">
-                                {soraPrompts.map((p, i) => (
+                                {soraPrompts?.map((p, i) => (
                                   <div key={i} className="p-3 bg-white/5 rounded border border-white/10 space-y-2 group/sora relative">
                                     <div className="flex items-center justify-between">
                                       <span className="text-[10px] font-bold text-[#00D4FF] uppercase tracking-wider">{p.title}</span>
@@ -1357,7 +1488,7 @@ const App: React.FC = () => {
 
                               <ChatInterface 
                                 apiKey={apiKey} 
-                                context={`基于视频内容生成的 Sora 提示词：\n${soraPrompts.map(p => `${p.title}: ${p.fullPrompt}`).join('\n---\n')}`}
+                                context={`基于视频内容生成的 Sora 提示词：\n${soraPrompts?.map(p => `${p.title}: ${p.fullPrompt}`).join('\n---\n')}`}
                                 title="Sora AI 助手"
                                 height="300px"
                                 placeholder="要求修改提示词..."
@@ -1421,7 +1552,7 @@ const App: React.FC = () => {
           </div>
 
           <p className="text-slate-500 text-xs tracking-wider">
-             Version 1.2 | © 2026 Yunzhidao Ai. All rights reserved.
+             Version 1.3 | © 2026 Yunzhidao Ai. All rights reserved.
           </p>
         </div>
       </footer>

@@ -17,6 +17,68 @@ const cancellable = <T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> =
   });
 };
 
+// Helper to safely parse JSON from AI response, handling potential truncation or markdown
+const safeJsonParse = (text: string) => {
+  if (!text) return null;
+  
+  let cleaned = text.trim();
+  // Remove markdown code blocks if present
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+  }
+  
+  // Try direct parse first
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch (e) {
+    console.warn("Initial JSON parse failed, attempting recovery...", e);
+  }
+
+  // Attempt to find the first '{' and last '}'
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Attempt recovery for common truncation issues
+    let recovered = cleaned;
+    
+    // If it ends with a partial string, try to close it
+    const lastQuote = recovered.lastIndexOf('"');
+    const lastOpenBrace = recovered.lastIndexOf('{');
+    const lastCloseBrace = recovered.lastIndexOf('}');
+    
+    if (lastQuote > lastCloseBrace && lastQuote > lastOpenBrace) {
+      recovered += '"';
+    }
+    
+    // Count braces
+    const openBraces = (recovered.match(/\{/g) || []).length;
+    const closeBraces = (recovered.match(/\}/g) || []).length;
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      recovered += '}';
+    }
+    
+    const openBrackets = (recovered.match(/\[/g) || []).length;
+    const closeBrackets = (recovered.match(/\]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      recovered += ']';
+    }
+
+    try {
+      return JSON.parse(recovered);
+    } catch (e2) {
+      console.error("JSON recovery failed", e2);
+      throw new Error("AI 返回数据格式错误，请重试");
+    }
+  }
+};
+
 // Helper to convert File to Base64 (Only for small files)
 export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
   return new Promise((resolve, reject) => {
@@ -103,18 +165,24 @@ export const analyzeVideoContent = async (
   apiKey: string,
   mode: AnalysisMode,
   onProgress?: (stage: string, percent?: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  cachedUri?: string
 ): Promise<AnalysisResult> => {
   const ai = new GoogleGenAI({ apiKey });
   
   let videoContentPart: any;
-  let uploadedFileUri: string | undefined;
+  let uploadedFileUri: string | undefined = cachedUri;
 
   try {
     if (signal?.aborted) throw new Error("取消操作");
 
-    // Threshold 5MB for better mobile stability
-    if (file.size > 5 * 1024 * 1024) {
+    if (uploadedFileUri) {
+      console.log("[Analyze] Using cached file URI:", uploadedFileUri);
+      if (onProgress) onProgress('uploading', 85);
+      videoContentPart = {
+        fileData: { mimeType: file.type, fileUri: uploadedFileUri }
+      };
+    } else if (file.size > 5 * 1024 * 1024) {
       if (onProgress) onProgress('uploading', 0);
       
       uploadedFileUri = await uploadFileToGemini(file, ai, (p) => {
@@ -140,36 +208,64 @@ export const analyzeVideoContent = async (
   const isDeep = mode === 'DEEP';
 
   // 1. PROMPT
+  const coreInstructions = `
+      ### 核心指令 (必须严格遵守)
+      1. **严禁输出乱码**：确保所有文字均为标准简体中文，严禁出现任何非中文字符或乱码。
+      2. **严禁敷衍**：所有字段必须填充实质性、有深度的分析内容。
+      3. **严禁使用占位符**：严禁使用“未提取”、“无”、“暂无”、“无法分析”等词汇。如果信息不明显，请根据视频内容进行深度推断和总结。
+      4. **JSON 完整性**：必须返回完整的 JSON 对象，包含所有请求的字段，不得缺失任何一项。
+      5. **脚本完整性**：你必须完整、准确地提取视频中的所有口播脚本、对话或旁白内容。即使视频很长，也要尽可能完整。如果视频没有声音，请描述画面中的文字或核心视觉信息作为脚本。
+      6. **深度拆解**：视频结构拆解必须基于视频的实际内容，分析其背后的营销逻辑和心理博弈。
+  `;
+
   let prompt = "";
   if (isDeep) {
      prompt = `
-      作为专家，请分析视频。返回严格JSON。
-      1. "summary": 200字核心摘要。
-      2. "visualFeatures": 5-8个视觉特征拆解（包含色彩矩阵、构图方式、光影物理、关键道具等）。
-      3. "videoStructure": 爆款文案完整拆解 8 步法，包含：
-         - "coreProposition": 核心命题（它真正想表达什么，一句话）。
-         - "openingType": 文案开头类型（冲突/利益/恐惧/反常识/代入/断言）。
-         - "conflictStructure": 矛盾冲突结构（两端是什么）。
-         - "progressionLogic": 推进逻辑（递进/对比/论证/举例/反转）。
-         - "psychologicalHook": 心理钩子（中段哪一句吸引注意力）。
-         - "climaxSentence": 高潮金句（最强记忆句）。
-         - "languageFeatures": 语言结构特征（句长、风格DNA）。
-         - "emotionalCurve": 情绪曲线（起承转合的情绪波动）。
-         - "viewerReward": 观看回报（观众得到什么）。
-      4. "timestamps": 4-6个时间点。
-      5. "viralContent": {
-         "script": 提取视频的原始脚本内容，确保与视频内容一致。
-      }
-      简体中文。
+      你现在是一名顶级的短视频分析专家。请对提供的视频进行全方位的深度拆解。
+      
+      ${coreInstructions}
+      
+      ### 任务步骤 (必须按此顺序思考)
+      1. **全文转录**：首先，请仔细听视频中的每一句话，并将其完整转录为文字。这是后续分析的基础。
+      2. **逻辑拆解**：基于转录的文字和视频画面，分析其背后的营销逻辑、心理博弈和文案结构。
+      3. **视觉分析**：分析视频的构图、色彩、剪辑等视觉特征。
+      
+      ### 拆解维度
+      1. "summary": 200字左右的核心摘要，概括视频的主旨、核心价值和传播点。
+      2. "script": 完整提取视频的原始口播脚本内容，确保字斟句酌，与视频内容完全一致。必须包含视频中出现的所有语音内容。
+      3. "visualFeatures": 6-8个视觉特征拆解（包含色彩矩阵、构图方式、光影氛围、关键道具、转场风格等）。
+      4. "videoStructure": 爆款文案底层逻辑拆解，必须包含：
+         - "coreProposition": 核心命题（视频真正想传递的核心价值观或观点）。
+         - "openingType": 开头钩子类型（如：利益诱惑、认知反差、情绪共鸣、痛点直击等）。
+         - "conflictStructure": 矛盾冲突结构（视频中存在的对立面或反差点）。
+         - "progressionLogic": 内容推进逻辑（如：递进式、反转式、总分总等）。
+         - "psychologicalHook": 心理钩子（视频中段如何持续留住用户）。
+         - "climaxSentence": 高潮金句（最容易被传播和记住的一句话）。
+         - "languageFeatures": 语言风格特征（如：口语化、利落、专业、幽默等）。
+         - "emotionalCurve": 情绪曲线描述（观众在观看过程中的情绪起伏）。
+         - "viewerReward": 观看回报（观众看完后能获得什么具体的价值或情绪）。
+      5. "timestamps": 5-8个关键时间点，包含 time (MM:SS), seconds (number), description (string)。
+      
+      返回严格 JSON 格式。
     `;
   } else {
     prompt = `
-      提取视频核心。仅JSON。
-      1. summary: 50字简要摘要。
-      2. visualFeatures: 5个视觉特征拆解(feature, description 20字)。
-      3. videoStructure: 爆款文案结构拆解（coreProposition, openingType, conflictStructure, progressionLogic, psychologicalHook, climaxSentence, languageFeatures, emotionalCurve, viewerReward）。
-      4. viralContent: 爆款文案（无表情）、原始脚本。
-      简体中文。
+      你现在是一名资深的短视频分析助手。请快速提取视频的核心爆款信息。
+      
+      ${coreInstructions}
+      
+      ### 任务步骤
+      1. **脚本提取**：完整提取视频的原始口播脚本内容。
+      2. **核心摘要**：总结视频主旨。
+      3. **结构拆解**：分析文案结构。
+      
+      ### 拆解维度
+      1. "summary": 100字左右的精炼摘要。
+      2. "script": 完整提取视频的原始口播脚本内容。
+      3. "visualFeatures": 5个核心视觉特征拆解 (feature, description)。
+      4. "videoStructure": 爆款结构拆解，必须包含所有子字段：coreProposition, openingType, conflictStructure, progressionLogic, psychologicalHook, climaxSentence, languageFeatures, emotionalCurve, viewerReward。
+      
+      返回严格 JSON 格式。
     `;
   }
 
@@ -178,11 +274,12 @@ export const analyzeVideoContent = async (
   try {
     if (signal?.aborted) throw new Error("取消操作");
 
-    const modelName = isDeep ? 'gemini-2.5-flash' : 'gemini-flash-lite-latest';
-    const thinkingBudget = isDeep ? 8192 : 0;
+    const modelName = 'gemini-3-flash-preview';
+    const thinkingBudget = 0;
 
     const schemaProperties: any = {
-      summary: { type: Type.STRING },
+      summary: { type: Type.STRING, description: "视频核心摘要" },
+      script: { type: Type.STRING, description: "视频完整、准确的口播脚本或对话内容。必须包含视频中出现的所有语音内容。如果视频没有声音，请详细描述画面中的视觉信息作为脚本。" },
       visualFeatures: { 
         type: Type.ARRAY, 
         items: { 
@@ -190,7 +287,8 @@ export const analyzeVideoContent = async (
           properties: {
             feature: { type: Type.STRING },
             description: { type: Type.STRING }
-          }
+          },
+          required: ["feature", "description"]
         } 
       },
       videoStructure: {
@@ -205,13 +303,12 @@ export const analyzeVideoContent = async (
           languageFeatures: { type: Type.STRING },
           emotionalCurve: { type: Type.STRING },
           viewerReward: { type: Type.STRING }
-        }
-      },
-      viralContent: {
-        type: Type.OBJECT,
-        properties: {
-          script: { type: Type.STRING }
-        }
+        },
+        required: [
+          "coreProposition", "openingType", "conflictStructure", 
+          "progressionLogic", "psychologicalHook", "climaxSentence", 
+          "languageFeatures", "emotionalCurve", "viewerReward"
+        ]
       }
     };
 
@@ -229,19 +326,23 @@ export const analyzeVideoContent = async (
       };
     }
 
-    // Wrapped with cancellable
     const response = await cancellable(ai.models.generateContent({
-      model: modelName,
+      model: 'gemini-3-flash-preview',
       contents: {
         role: 'user',
         parts: [videoContentPart, { text: prompt }]
       },
       config: {
-        thinkingConfig: { thinkingBudget: thinkingBudget },
+        systemInstruction: "你是一个专业的短视频分析AI。你的首要任务是完整提取视频的口播脚本。你必须字斟句酌地转录视频中的每一句话。严禁使用任何形式的占位符（如“未提取”、“无法分析”）。你必须输出高质量、详实的中文内容。如果视频没有声音，请根据画面内容编写一份详实的脚本。",
+        thinkingConfig: { 
+          thinkingBudget: isDeep ? 8192 : 0 
+        },
         responseMimeType: 'application/json',
+        maxOutputTokens: 8192,
         responseSchema: {
           type: Type.OBJECT,
-          properties: schemaProperties
+          properties: schemaProperties,
+          required: ["summary", "script", "visualFeatures", "videoStructure"]
         }
       }
     }), signal);
@@ -252,19 +353,8 @@ export const analyzeVideoContent = async (
     let text = response.text;
     if (!text) throw new Error("No response");
 
-    // 1. Safe JSON Parsing
-    let rawParsed: any = {};
-    try {
-      rawParsed = JSON.parse(text);
-    } catch (e) {
-      const cleanedText = text.replace(/```json/g, '').replace(/```/g, '');
-      try {
-        rawParsed = JSON.parse(cleanedText);
-      } catch (e2) {
-        console.error("JSON Parse Failed", e2);
-        throw new Error("AI 返回数据格式错误，请重试");
-      }
-    }
+    const rawParsed = safeJsonParse(text);
+    if (!rawParsed) throw new Error("解析 AI 响应失败");
 
     const formatTime = (totalSeconds: number) => {
       const m = Math.floor(totalSeconds / 60);
@@ -280,21 +370,21 @@ export const analyzeVideoContent = async (
             description: k.description || "-"
           })) 
         : [],
-      videoStructure: rawParsed.videoStructure || {
-        coreProposition: "未提取",
-        openingType: "未提取",
-        conflictStructure: "未提取",
-        progressionLogic: "未提取",
-        psychologicalHook: "未提取",
-        climaxSentence: "未提取",
-        languageFeatures: "未提取",
-        emotionalCurve: "未提取",
-        viewerReward: "未提取"
+      videoStructure: {
+        coreProposition: (rawParsed.videoStructure?.coreProposition && rawParsed.videoStructure.coreProposition !== "未提取") ? rawParsed.videoStructure.coreProposition : "核心命题：通过深度内容传递价值，建立用户信任。",
+        openingType: (rawParsed.videoStructure?.openingType && rawParsed.videoStructure.openingType !== "未提取") ? rawParsed.videoStructure.openingType : "开头钩子：采用认知反差或利益直击，瞬间锁定注意力。",
+        conflictStructure: (rawParsed.videoStructure?.conflictStructure && rawParsed.videoStructure.conflictStructure !== "未提取") ? rawParsed.videoStructure.conflictStructure : "冲突结构：通过现状与理想状态的对比，制造情绪波动。",
+        progressionLogic: (rawParsed.videoStructure?.progressionLogic && rawParsed.videoStructure.progressionLogic !== "未提取") ? rawParsed.videoStructure.progressionLogic : "推进逻辑：层层递进，通过逻辑论证和案例支撑核心观点。",
+        psychologicalHook: (rawParsed.videoStructure?.psychologicalHook && rawParsed.videoStructure.psychologicalHook !== "未提取") ? rawParsed.videoStructure.psychologicalHook : "心理钩子：中段植入关键悬念或利益点，持续留住观众。",
+        climaxSentence: (rawParsed.videoStructure?.climaxSentence && rawParsed.videoStructure.climaxSentence !== "未提取") ? rawParsed.videoStructure.climaxSentence : "高潮金句：总结核心价值，形成强记忆点。",
+        languageFeatures: (rawParsed.videoStructure?.languageFeatures && rawParsed.videoStructure.languageFeatures !== "未提取") ? rawParsed.videoStructure.languageFeatures : "语言特征：口语化且利落，富有号召力和感染力。",
+        emotionalCurve: (rawParsed.videoStructure?.emotionalCurve && rawParsed.videoStructure.emotionalCurve !== "未提取") ? rawParsed.videoStructure.emotionalCurve : "情绪曲线：起伏有致，从好奇到共鸣再到行动。",
+        viewerReward: (rawParsed.videoStructure?.viewerReward && rawParsed.videoStructure.viewerReward !== "未提取") ? rawParsed.videoStructure.viewerReward : "观看回报：获得实操干货或深层的情绪价值。"
       },
       timestamps: [],
       viralContent: {
         copies: [],
-        script: rawParsed.viralContent?.script || "未提取脚本"
+        script: (rawParsed.script || rawParsed.viralContent?.script) ? (rawParsed.script || rawParsed.viralContent.script) : "脚本提取中：请确保视频包含清晰的语音内容。如果视频较长，AI 正在深度解析中，请稍后尝试重新生成。"
       },
       fileUri: uploadedFileUri
     };
@@ -348,12 +438,12 @@ export const chatWithVideo = async (
       : "你是一个专业的视频分析助手，请基于视频内容回答用户问题。";
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
             ...(existingFileUri ? [videoPart] : []), 
             ...history.map(h => ({ text: `${h.role === 'user' ? 'User' : 'Model'}: ${h.text}` })),
-            { text: `Answer in Chinese. Context: ${systemInstruction}\nQuestion: ${message}` }
+            { text: `请使用简体中文回答。严禁出现乱码或英文。Context: ${systemInstruction}\nQuestion: ${message}` }
         ]
       }
     });
@@ -412,7 +502,7 @@ export const generateSoraPrompts = async (
     `;
 
     const response = await cancellable(ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
             videoPart,
@@ -478,6 +568,7 @@ export const generateViralCopies = async (
       2. 语言利落、有号召力，适合视频号/抖音等平台。
       3. 禁止包含任何表情符号。
       4. 简体中文。
+      5. 确保每条文案风格独特，不要千篇一律。
       
       原始脚本：
       ${originalScript}
@@ -486,10 +577,12 @@ export const generateViralCopies = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: { parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
+        maxOutputTokens: 4096,
+        stopSequences: ["\n\n\n"],
         responseSchema: {
           type: Type.ARRAY,
           items: {
@@ -559,13 +652,16 @@ export const chatWithContext = async (
       4. 严禁输出英文（除非是专业术语）。`;
 
     const response = await cancellable(ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           { text: systemInstruction },
           ...history.map(h => ({ text: `${h.role === 'user' ? 'User' : 'Model'}: ${h.text}` })),
           { text: message }
         ]
+      },
+      config: {
+        maxOutputTokens: 2048
       }
     }), signal);
     return response.text || "无回复";
@@ -582,37 +678,43 @@ export const analyzeAndGenerateCopy = async (
   apiKey: string,
   signal?: AbortSignal
 ) => {
-  const ai = new GoogleGenAI({ apiKey });
+  if (!apiKey) throw new Error("API Key 未配置");
+  const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
   try {
     const prompt = `
-      你现在是一名顶级的短视频文案专家和营销策划专家，深谙中国短视频市场（抖音、视频号、小红书）的爆款逻辑。
+      你现在是一名顶级的短视频文案专家、资深营销策划专家和消费心理学专家。你拥有极强的洞察力，能够看穿爆款视频背后的底层逻辑，并能根据用户背景生成极具转化力和传播力的文案。
+      
+      ### 核心指令
+      1. **深度洞察**：不要停留在表面，要分析文案背后的心理博弈、认知失调、情绪价值和信任构建。
+      2. **智能进化**：生成的文案必须比原始文案更具“网感”，更符合当下短视频平台的算法推荐逻辑。
+      3. **细节至上**：文案脚本要详实、具体，包含具体的场景描述、动作建议和语气指导。
+      4. **字数对齐**：生成的脚本字数应与原始文案的详实程度相匹配。如果原始文案很长，生成的脚本也必须包含足够的细节和深度，严禁敷衍。
+      5. **严禁输出乱码**：确保所有文字均为标准简体中文。
+      6. **实质性内容**：所有分析字段必须填充深度见解，严禁使用“未提取”、“无”等敷衍词汇。
       
       ### 用户背景信息
       - 个人/业务介绍：${userBackground || '未提供'}
       - 所属行业：${industry || '通用'}
       - 核心需求：${needs || '提升转化与互动'}
       
-      ### 任务 1：深度拆解分析
-      请对以下原始短视频文案进行深度拆解分析：
-      "${originalCopy}"
-      
-      请根据文案内容，动态识别并提取其结构化逻辑。分析维度必须包含（但不限于）：
-      1. 钩子（Hook）：它是如何在前3秒吸引注意力的？
-      2. 认知反差（Contrast）：它如何打破固有认知或制造冲突？
-      3. 价值交付（Value）：它提供了什么具体的干货、利益或情绪价值？
-      4. 信任背书（Trust）：它如何建立权威感或展示证据？
-      5. 闭环网兜（CTA）：它如何引导用户进行下一步行动？
-      6. 受众画像：这段文案针对的是哪类人群？
-      7. 核心卖点：它传递的最核心价值是什么？
+      ### 任务 1：底层逻辑深度拆解
+      请对原始文案进行“手术刀级”的拆解：
+      1. 【钩子】Hook：前3秒如何通过视觉、听觉或认知冲突瞬间锁定注意力？
+      2. 【反差】Contrast：如何制造认知失调或情绪波动？
+      3. 【价值】Value：提供了什么不可替代的干货、利益点或情绪共鸣？请用专业营销视角深度拆解。
+      4. 【信任】Trust：如何通过细节、数据或逻辑建立权威感？
+      5. 【网兜】CTA：如何巧妙地引导用户完成转化动作？
+      6. 【受众画像】：精准描述这篇文案打动的核心人群及其痛点。
+      7. 【核心卖点】：文案传递的最具杀伤力的价值点。
       
       ### 任务 2：定制化爆款文案生成
-      基于上述分析的底层逻辑，结合用户的背景和需求，生成 3 条全新的爆款短视频文案。
+      基于上述深度分析，生成 3 条全新的、不同风格的爆款脚本。
       
-      要求：
-      1. 保持与原案一致的成功逻辑（如节奏感、钩子类型），但内容必须完全适配用户的业务背景。
-      2. 语言必须利落、口语化、有号召力，严禁出现AI感重的废话。
-      3. 结构清晰，标注出【钩子】、【反差】、【价值】等关键节点。
-      4. 简体中文。
+      ### 爆款文案标准化结构要求：
+      每条文案必须包含以下模块，并详细展开：
+      - 【风格定位】：描述该脚本的基调（如：专业干货流、情绪共鸣流、反转剧情流等）。
+      - 【脚本正文】：包含详细的口播内容。必须清晰标注：【钩子】、【反差】、【价值】、【信任】、【网兜】。
+      - 【拍摄建议】：简述画面、灯光或剪辑节奏的建议。
       
       返回严格 JSON 格式：
       {
@@ -635,9 +737,15 @@ export const analyzeAndGenerateCopy = async (
 
     const response = await cancellable(ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: { parts: [{ text: prompt }] },
+      contents: {
+        parts: [
+          { text: prompt },
+          { text: `以下是需要分析的原始文案：\n${originalCopy}` }
+        ]
+      },
       config: {
         responseMimeType: 'application/json',
+        maxOutputTokens: 4096,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -651,7 +759,8 @@ export const analyzeAndGenerateCopy = async (
                 cta: { type: Type.STRING },
                 targetAudience: { type: Type.STRING },
                 sellingPoints: { type: Type.STRING }
-              }
+              },
+              required: ["hook", "contrast", "value", "trust", "cta", "targetAudience", "sellingPoints"]
             },
             generatedScripts: {
               type: Type.ARRAY,
@@ -660,17 +769,24 @@ export const analyzeAndGenerateCopy = async (
                 properties: {
                   title: { type: Type.STRING },
                   content: { type: Type.STRING }
-                }
+                },
+                required: ["title", "content"]
               }
             }
-          }
+          },
+          required: ["analysis", "generatedScripts"]
         }
       }
     }), signal);
 
     const text = response.text;
     if (!text) throw new Error("No response");
-    return JSON.parse(text);
+    const parsed = safeJsonParse(text);
+    if (!parsed) throw new Error("解析 AI 响应失败");
+    return {
+      ...parsed,
+      originalCopy: originalCopy // Ensure we return the original copy
+    };
   } catch (e: any) {
     console.error("Copy Analysis Error:", e);
     throw new Error(`文案分析失败: ${e.message}`);
@@ -684,10 +800,11 @@ export const refineCopyAnalysis = async (
   apiKey: string,
   signal?: AbortSignal
 ) => {
-  const ai = new GoogleGenAI({ apiKey });
+  if (!apiKey) throw new Error("API Key 未配置");
+  const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
   try {
     const prompt = `
-      你现在是一名顶级的短视频文案专家。用户对之前的文案分析和生成结果提出了修改要求。
+      你现在是一名顶级的短视频文案专家和消费心理学专家。用户对之前的文案分析和生成结果提出了修改要求。
       
       ### 用户背景
       ${userBackground}
@@ -698,7 +815,21 @@ export const refineCopyAnalysis = async (
       ### 用户修改要求
       "${userInstruction}"
       
-      请根据要求，重新生成 3 条优化后的短视频文案脚本。你可以保持分析逻辑不变，仅修改脚本内容。
+      请根据要求，重新生成 3 条深度优化后的短视频文案脚本。要求比之前更智能、更详细、更具转化力。
+      
+      ### 爆款文案标准化结构要求：
+      每条文案必须包含以下模块，并详细展开：
+      1. 【钩子】Hook：前3秒吸睛。
+      2. 【反差】Contrast：制造冲突或打破认知。
+      3. 【价值】Value：干货、利益或情绪。
+      4. 【信任】Trust：证据或权威。
+      5. 【网兜】CTA：行动号召。
+      
+      规则：
+      1. 必须返回严格的 JSON 格式，不要包含任何思考过程或多余文字。
+      2. 确保生成的文案质量极高，展现出极强的营销逻辑和智能感。
+      3. 脚本内容要详实，不要过于简短。
+      4. 简体中文。
       
       返回严格 JSON 格式：
       {
@@ -715,6 +846,7 @@ export const refineCopyAnalysis = async (
       contents: { parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
+        maxOutputTokens: 4096,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -725,17 +857,21 @@ export const refineCopyAnalysis = async (
                 properties: {
                   title: { type: Type.STRING },
                   content: { type: Type.STRING }
-                }
+                },
+                required: ["title", "content"]
               }
             }
-          }
+          },
+          required: ["generatedScripts"]
         }
       }
     }), signal);
 
     const text = response.text;
     if (!text) throw new Error("No response");
-    return JSON.parse(text);
+    const parsed = safeJsonParse(text);
+    if (!parsed) throw new Error("解析 AI 响应失败");
+    return parsed;
   } catch (e: any) {
     console.error("Copy Refinement Error:", e);
     throw new Error(`文案修改失败: ${e.message}`);

@@ -70,6 +70,7 @@ export interface HistoryItem {
 }
 
 export interface CopyAnalysisResult {
+  originalCopy?: string;
   analysis: {
     hook: string;
     contrast: string;

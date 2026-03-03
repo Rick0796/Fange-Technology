@@ -79,7 +79,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
 
     try {
-      const history = messages.map(m => ({ role: m.role, text: m.text }));
+      const history = messages?.map(m => ({ role: m.role, text: m.text })) || [];
       let responseText = "";
       
       if (context) {
@@ -169,7 +169,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             <p className="mb-1 uppercase tracking-widest text-[10px]">等待指令...</p>
           </div>
         )}
-        {messages.map((msg) => (
+        {messages?.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[90%] px-3 py-2 border ${
               msg.role === 'user' 
